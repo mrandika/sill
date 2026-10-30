@@ -334,12 +334,12 @@ enum TextInputRules {
     /// dictation makes later never backspaces where the caret is now. Typing leaves it: text, a backspace
     /// among it, and a Return or a Tab typed as text, which keeps what was typed and makes what came
     /// before it final instead (`endOfReturnOrTab`, `TextComposition.fence`). Moves, scrolls and every up
-    /// leave it too.
+    /// leave it too, and a pinch (`.magnify`) never touches the caret.
     static func movesCaret(_ event: InputEvent) -> Bool {
         switch event {
         case .pointer(let action, _, _): return action == .leftDown || action == .rightDown
         case .key(_, let down, _): return down
-        case .text, .scroll, .scrollGesture: return false
+        case .text, .scroll, .scrollGesture, .magnify: return false
         }
     }
 

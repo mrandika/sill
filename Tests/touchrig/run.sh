@@ -45,7 +45,8 @@ fetch() {
 for f in iOSClient/TrackpadView.swift iOSClient/InputOverlay.swift iOSClient/PointerPresence.swift \
          iOSClient/TrackpadGestures.swift iOSClient/KeyChords.swift iOSClient/PortraitStreamScreen.swift \
          iOSClient/HardwareKeyboardPolicy.swift iOSClient/TextComposition.swift Sources/StreamProtocol/Input.swift \
-         Sources/StreamProtocol/ScrollDirection.swift iOSClient/StreamZoom.swift iOSClient/PhonePortraitLayout.swift; do
+         Sources/StreamProtocol/ScrollDirection.swift iOSClient/StreamZoom.swift iOSClient/PhonePortraitLayout.swift \
+         iOSClient/ImmersivePolicy.swift; do
     fetch "$f"
 done
 cd "$work/src"
@@ -60,12 +61,14 @@ flags=()
 # The gestures when the surfaces have them (the stroke gate and `sendGesture`), and the picture's zoom (#65).
 if grep -q "var sendGesture" TrackpadView.swift; then flags+=(-D GESTURES); fi
 if grep -q "StreamZoom" InputOverlay.swift; then flags+=(-D ZOOM); fi
+# Immersive's top edge (docs/immersive-plan.md): its scenarios, once the input view has it.
+if grep -q "immersiveEdge" InputOverlay.swift; then flags+=(-D IMMERSIVE); fi
 cp "$here/Stubs.swift" "$here/main.swift" "$here/TouchSynth.h" "$here/TouchSynth.m" "$here/Bridging.h" .
 
 target=arm64-apple-ios17.0-simulator
 xcrun -sdk iphonesimulator clang -target $target -fobjc-arc -Wall -c TouchSynth.m -o TouchSynth.o
 xcrun -sdk iphonesimulator swiftc -target $target -swift-version 5 -module-name TouchRig -Onone ${flags[@]+"${flags[@]}"} \
-    -import-objc-header Bridging.h Stubs.swift Keys.swift Input.swift $(ls PointerPresence.swift TrackpadGestures.swift KeyChords.swift HardwareKeyboardPolicy.swift TextComposition.swift ScrollDirection.swift StreamZoom.swift PhonePortraitLayout.swift 2>/dev/null) \
+    -import-objc-header Bridging.h Stubs.swift Keys.swift Input.swift $(ls PointerPresence.swift TrackpadGestures.swift KeyChords.swift HardwareKeyboardPolicy.swift TextComposition.swift ScrollDirection.swift StreamZoom.swift PhonePortraitLayout.swift ImmersivePolicy.swift 2>/dev/null) \
     TrackpadView.swift InputOverlay.swift main.swift TouchSynth.o -o "$work/TouchRig.app/TouchRig"
 cat > "$work/TouchRig.app/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>

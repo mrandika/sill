@@ -168,7 +168,7 @@ struct Mac {
             for s in keys.text(from: d) { post(s) }
             for _ in string { log.append(.text); table = 0; real = 0 }   // a character's down, with no flags
             judge("after text")
-        case .pointer, .scroll, .scrollGesture:
+        case .pointer, .scroll, .scrollGesture, .magnify:
             log.append(.pointer(table))
             let stray = table & (modifierBits | fn) & ~accounted
             if stray != 0 { broken.append("a pointer event carries \(names(stray)), which no key down accounts for") }
@@ -748,7 +748,7 @@ struct Glue {
                 log.append("key \(s.virtualKey) \(s.down ? "down" : "up") (\(names(s.flags)))")
             }
         case .text: log.append("text")
-        case .scroll, .scrollGesture: log.append("scroll")
+        case .scroll, .scrollGesture, .magnify: log.append("scroll")
         }
     }
     mutating func send(_ events: [InputEvent], placed: Bool, from c: Conn) { for e in events { input(e, placed: placed, from: c) } }
@@ -1036,7 +1036,7 @@ struct OldMac {
             log.append(.key(k, isDown, f)); table = f
             if isDown { down[k] = f } else { down[k] = nil }
         case .text: log.append(.text); table = 0
-        case .pointer, .scroll, .scrollGesture: log.append(.pointer(table))
+        case .pointer, .scroll, .scrollGesture, .magnify: log.append(.pointer(table))
         }
     }
     mutating func send(_ events: [InputEvent]) { for e in events { input(e) } }
@@ -1184,6 +1184,60 @@ struct Keyboard {
     var escSeen = true
     /// Esc let go: pressesEnded only where pressesBegan had the press.
     mutating func releaseEsc() -> [InputEvent] { release(uEsc, seen: escSeen) }
+}
+
+// Left Option as Command: iPadOS keeps ⌘Space and ⌘Tab, so ⌥Space and ⌥Tab stand in for them.
+do {
+    let uLOptK: UInt16 = 0xE2, uROptK: UInt16 = 0xE6, uLCmdK: UInt16 = 0xE3, uSpaceK: UInt16 = 0x2C, uTabK: UInt16 = 0x2B
+    var fk = ForwardedKeys(); fk.leftOptionAsCommand = true
+    check(fk.began(uLOptK, modifiers: option) == .key(hidUsage: uLCmdK, down: true, modifiers: command), "left ⌥ down goes as left ⌘, carrying command")
+    check(fk.began(uSpaceK, modifiers: option) == .key(hidUsage: uSpaceK, down: true, modifiers: command), "⌥Space goes as ⌘Space")
+    check(fk.ended(uSpaceK) == .key(hidUsage: uSpaceK, down: false, modifiers: command), "Space's up with ⌘ still down")
+    fk.leftOptionAsCommand = false           // turned off while the key is held: its up still matches its down
+    check(fk.ended(uLOptK) == .key(hidUsage: uLCmdK, down: false, modifiers: 0), "left ⌥ up goes as left ⌘ up")
+    check(fk.down.isEmpty, "nothing left down")
+    var tab = ForwardedKeys(); tab.leftOptionAsCommand = true
+    _ = tab.began(uLOptK, modifiers: option)
+    check(tab.began(uTabK, modifiers: option) == .key(hidUsage: uTabK, down: true, modifiers: command), "⌥Tab goes as ⌘Tab")
+    var right = ForwardedKeys(); right.leftOptionAsCommand = true
+    check(right.began(uROptK, modifiers: option) == .key(hidUsage: uROptK, down: true, modifiers: option), "right ⌥ stays option")
+    check(right.began(uSpaceK, modifiers: option) == .key(hidUsage: uSpaceK, down: true, modifiers: option), "right ⌥Space stays ⌥Space")
+    var both = ForwardedKeys(); both.leftOptionAsCommand = true
+    _ = both.began(uLOptK, modifiers: option); _ = both.began(uROptK, modifiers: option)
+    check(both.began(uSpaceK, modifiers: option) == .key(hidUsage: uSpaceK, down: true, modifiers: option | command),
+          "with the right ⌥ down too: option stays, and the ⌘ the Mac holds for the left ⌥ with it")
+    _ = both.ended(uSpaceK); _ = both.ended(uROptK)
+    check(both.began(uTabK, modifiers: option) == .key(hidUsage: uTabK, down: true, modifiers: command), "the right ⌥ up again: ⌥Tab is ⌘Tab")
+    var off = ForwardedKeys()
+    check(off.began(uLOptK, modifiers: option) == .key(hidUsage: uLOptK, down: true, modifiers: option), "switch off: left ⌥ is ⌥")
+    check(off.began(uSpaceK, modifiers: option) == .key(hidUsage: uSpaceK, down: true, modifiers: option), "switch off: ⌥Space is ⌥Space")
+    var all = ForwardedKeys(); all.leftOptionAsCommand = true
+    _ = all.began(uLOptK, modifiers: option)
+    check(all.releaseAll() == [.key(hidUsage: uLCmdK, down: false, modifiers: 0)] && all.down.isEmpty, "releaseAll lets the left ⌘ it sent up")
+    check(all.began(uSpaceK, modifiers: option) == .key(hidUsage: uSpaceK, down: true, modifiers: option), "after releaseAll, a fresh ⌥ (no left ⌥ down) is option")
+    // The left ⌘ and the left ⌥ sent as it, both held: the Mac's ⌘ goes up only with the last of them.
+    var cmdFirst = ForwardedKeys(); cmdFirst.leftOptionAsCommand = true
+    _ = cmdFirst.pressed(uLCmdK, modifiers: command, at: 1)
+    _ = cmdFirst.pressed(uLOptK, modifiers: command | option, at: 2)
+    check(cmdFirst.released(uLOptK) == .swallow && cmdFirst.down == [uLCmdK], "left ⌥ up while the left ⌘ is held: ⌘ stays down on the Mac")
+    check(cmdFirst.released(uLCmdK) == .send(.key(hidUsage: uLCmdK, down: false, modifiers: 0)) && cmdFirst.down.isEmpty,
+          "the left ⌘ up last: the Mac's ⌘ goes up")
+    cmdFirst.leftOptionAsCommand = false     // no stale remap left: a plain ⌥ now goes down and up as ⌥
+    _ = cmdFirst.pressed(uLOptK, modifiers: option, at: 3)
+    check(cmdFirst.released(uLOptK) == .send(.key(hidUsage: uLOptK, down: false, modifiers: 0)) && cmdFirst.down.isEmpty,
+          "after both, with the switch off, the left ⌥'s up is its own")
+    var optFirst = ForwardedKeys(); optFirst.leftOptionAsCommand = true
+    _ = optFirst.pressed(uLOptK, modifiers: option, at: 1)
+    _ = optFirst.pressed(uLCmdK, modifiers: command | option, at: 2)
+    check(optFirst.released(uLCmdK) == .swallow && optFirst.down == [uLCmdK], "left ⌘ up while the left ⌥ sent as ⌘ is held: ⌘ stays down on the Mac")
+    check(optFirst.pressed(uSpaceK, modifiers: option, at: 3) == .send(.key(hidUsage: uSpaceK, down: true, modifiers: command)),
+          "⌥Space is still ⌘Space after the left ⌘ went up")
+    _ = optFirst.released(uSpaceK)
+    check(optFirst.released(uLOptK) == .send(.key(hidUsage: uLCmdK, down: false, modifiers: 0)) && optFirst.down.isEmpty,
+          "the left ⌥ up last: the Mac's ⌘ goes up")
+    var lone = ForwardedKeys(); lone.leftOptionAsCommand = true
+    _ = lone.pressed(uLCmdK, modifiers: command, at: 1)
+    check(lone.released(uLCmdK) == .send(.key(hidUsage: uLCmdK, down: false, modifiers: 0)), "the left ⌘ alone goes up as ever")
 }
 
 // Which keys go to the Mac as keys: the ones the text system never delivers, ⌘, ⌃ and ⌥ themselves,
@@ -1449,6 +1503,29 @@ do {
     check(falseReports == 0 && reported[.nothing] == nil, "device sessions on a Mac as the model says: \(falseReports) reported a modifier")
     check((reported[.modifierUps] ?? 0) > 250, "this device's modifier keys' ups are checked: \(reported)")
     print("device: \(sessions) sessions; checks reported in \(reported[.modifierUps] ?? 0) of 500 on a Mac ignoring modifier keys' ups and \(reported[.keyUps] ?? 0) of 500 ignoring other keys' ups")
+}
+
+// MARK: A held key (KeyRepeat; the device sends the down again, the host posts it as an autorepeat)
+
+do {
+    struct Dev: Hashable {}
+    var strokes = KeyStrokes()
+    let device = ObjectIdentifier(NSObject())
+    let first = strokes.key(usage: 0x4C, down: true, modifiers: 0, from: device)   // forward delete
+    let again = strokes.key(usage: 0x4C, down: true, modifiers: 0, from: device)
+    let up = strokes.key(usage: 0x4C, down: false, modifiers: 0, from: device)
+    let after = strokes.key(usage: 0x4C, down: true, modifiers: 0, from: device)
+    check(first?.last?.isRepeat == false, "a key's first down is no repeat")
+    check(again?.count == 1 && again?.last?.isRepeat == true && again?.last?.down == true, "a down of a key already down is an autorepeat: \(String(describing: again))")
+    check(up?.last?.isRepeat == false && up?.last?.down == false, "an up is no repeat")
+    check(after?.last?.isRepeat == false, "a down after the up is no repeat")
+    let cmd = strokes.key(usage: 0xE3, down: true, modifiers: command, from: device)
+    let cmdAgain = strokes.key(usage: 0xE3, down: true, modifiers: command, from: device)
+    check(cmd?.last?.isRepeat == false && cmdAgain?.last?.isRepeat == false, "a modifier's own key never repeats")
+    check(KeyRepeat.repeats(0x2A) && KeyRepeat.repeats(0x4C) && KeyRepeat.repeats(0x50) && KeyRepeat.repeats(0x04),
+          "delete, forward delete, arrows and letters repeat")
+    check(!KeyRepeat.repeats(0x29) && !KeyRepeat.repeats(0x3A) && !KeyRepeat.repeats(0x45) && !KeyRepeat.repeats(0xE3),
+          "Escape, F1 to F12 and the modifiers' own keys do not")
 }
 
 print(failures == 0 ? "ok: \(checks) checks" : "FAILED: \(failures) of \(checks) checks")

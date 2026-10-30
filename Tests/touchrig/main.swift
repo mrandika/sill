@@ -64,6 +64,8 @@ enum Step {
     /// The picture's zoom (#65): set to `factor` about a point of the overlay (from 1×), and logged.
     case zoom(CGFloat, CGPoint)
     case logZoom
+    /// Runs between frames: what a scenario sets up before its touches.
+    case call(() -> Void)
 }
 
 enum Gesture {
@@ -386,6 +388,7 @@ final class Runner {
             #if ZOOM
             if let overlay = view as? InputOverlayView { RigLog.log("zoom: " + Runner.zoomText(overlay.zoom)) }
             #endif
+        case .call(let run): run()
         }
     }
 }
@@ -405,6 +408,12 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
 final class Root: UIViewController {
     let trackpad = TrackpadSurface(frame: .zero)
     let overlay = InputOverlayView(frame: .zero)
+    #if IMMERSIVE
+    /// Immersive's top edge (docs/immersive-plan.md): an input view along the window's top, where the
+    /// edge's swipe begins, its proxy saying whether Immersive applies.
+    let edge = InputOverlayView(frame: .zero)
+    let edgeProxy = InputOverlayProxy()
+    #endif
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .black
@@ -415,6 +424,14 @@ final class Root: UIViewController {
         trackpad.send = { RigLog.log("trackpad send \(describe($0))") }
         overlay.send = { RigLog.log("overlay  send \(describe($0))") }
         overlay.videoSize = CGSize(width: 1512, height: 948)
+        #if IMMERSIVE
+        edge.backgroundColor = UIColor(white: 0.3, alpha: 1)
+        view.addSubview(edge)
+        edge.send = { RigLog.log("edge     send \(describe($0))") }
+        edge.videoSize = CGSize(width: 1512, height: 948)
+        edge.keyboardProxy = edgeProxy
+        edgeProxy.immersiveEdge = { RigLog.log("edge     immersive: the bar revealed") }
+        #endif
         #if GESTURES
         let on = ProcessInfo.processInfo.environment["RIG_SWITCH"] != "off"
         trackpad.sendGesture = { g, n in RigLog.log("trackpad gesture \(g.rawValue) fingers \(n)" + (on ? "" : " (switch off: not sent)")); return on }
@@ -427,6 +444,10 @@ final class Root: UIViewController {
         let h = (b.height - 16) / 2
         trackpad.frame = CGRect(x: b.minX, y: b.minY, width: b.width, height: h)
         overlay.frame = CGRect(x: b.minX, y: b.minY + h + 16, width: b.width, height: h)
+        #if IMMERSIVE
+        // The strip above the trackpad, from the window's very top: no other surface's touch lands in it.
+        edge.frame = CGRect(x: b.minX, y: 0, width: b.width, height: b.minY - 2)
+        #endif
     }
 }
 
@@ -469,6 +490,23 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         }
         #if ZOOM
         for (title, steps) in zoomScenarios(oc) { runner.add("OVERLAY ZOOM \(title)", root.overlay, steps) }
+        #endif
+        #if IMMERSIVE
+        // Immersive's edge: from 5 pt below the window's top (in the 20 pt zone) and from 30 (out of
+        // it), down and sideways, with Immersive applying and not. Only the first reveals the bar,
+        // and nothing of it is sent; the rest are the strokes they were.
+        print("RIG edge \(root.edge.frame)")
+        let top: (CGFloat) -> CGPoint = { y in root.edge.convert(CGPoint(x: w.bounds.midX, y: y), from: w) }
+        let edgeCases: [(String, Bool, CGPoint, CGFloat, CGFloat)] = [
+            ("on: 1-finger drag down 120 from 5 pt", true, top(5), 0, 120),
+            ("on: 1-finger drag down 120 from 30 pt", true, top(30), 0, 120),
+            ("on: 1-finger drag right 120 down 40 from 5 pt", true, top(5), 120, 40),
+            ("off: 1-finger drag down 120 from 5 pt", false, top(5), 0, 120),
+        ]
+        for (title, on, at, dx, dy) in edgeCases where !onlyZoom {
+            runner.add("IMMERSIVE \(title)", root.edge, [.call { root.edgeProxy.immersiveActive = on }]
+                       + Gesture.stroke([at], to: [CGPoint(x: at.x + dx, y: at.y + dy)], frames: 12))
+        }
         #endif
         runner.start { print("RIG done"); exit(0) }
     }

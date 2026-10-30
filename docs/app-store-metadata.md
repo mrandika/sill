@@ -318,7 +318,7 @@ Get started
 • The first time, a short tour shows you the controls.
 
 Made for touch
-• Tap to click. Touch and hold to right-click. Drag to scroll.
+• Tap to click. Tap with two fingers to right-click. Touch and hold, then drag, to select or move. Drag to scroll and pinch to zoom.
 • Apple Pencil works as a mouse, with hover on iPad models that support it.
 • Hold your device upright for a laptop layout: the picture on top, a trackpad and a row of keys below. On iPhone, turn on Larger Picture to give a window’s picture more of the screen.
 • On iPhone Duo, open it flat and your Mac fills the inner display. Half open, it’s a laptop: the picture above the fold, a trackpad and keys below. Closed, Sill runs on the cover display.
@@ -566,7 +566,7 @@ CONNECT AND PAIR (once per device)
 
 WHAT TO TRY
 - Apps (magnifying glass): pick a window, or search and open an app.
-- Tap to click, drag to scroll, touch and hold to right-click. Apple Pencil works as a mouse.
+- Tap to click, tap with two fingers to right-click, touch and hold then drag to select or move, drag to scroll, pinch to zoom. Apple Pencil works as a mouse.
 - Three fingers: swipe up for Mission Control, spread for Show Desktop.
 - Keyboard, Menus, Aa (text size), window thumbnails, Desktop.
 - Hold the device upright for a laptop layout with a trackpad and keys.
@@ -627,7 +627,7 @@ camera:
 | 4 | Accessibility: Allow…, the switch; the pane says "You're all set." | Both permissions allowed |
 | 5 | Open Sill on the iPad, Allow Local Network, the Mac appears ("Not paired"), tap it: the Mac's pairing window comes up, the iPad's camera reads its code | The Mac found without typing anything; the code scanned once; the Mac's desktop on the iPad |
 | 6 | Apps, pick Notes (a note written for the shoot); then Menus, Format, and a style for a line | The same window on both screens; the style chosen on the iPad applied on the Mac |
-| 7 | Touch: tap to click, drag to scroll, touch and hold for a right-click menu; Apple Pencil moving the pointer, with hover if the iPad supports it | Each action landing on the Mac at the same moment |
+| 7 | Touch: tap to click, tap with two fingers for a right-click menu, touch and hold then drag, drag to scroll, pinch to zoom; Apple Pencil moving the pointer, with hover if the iPad supports it | Each action landing on the Mac at the same moment |
 | 8 | Keyboard: type a sentence into the note | The letters appearing on the Mac too |
 | 9 | Turn the iPad upright: the laptop layout; move the pointer with the trackpad, click, two-finger scroll; three fingers up for Mission Control and down again; switch windows from a thumbnail; touch and hold one for its window buttons | The trackpad driving the Mac's pointer; Mission Control opening and closing on the Mac |
 | 10 | Settings (the gear): change Quality, show the same value in the Sill menu on the Mac, then Disconnect | The panel and the Mac's menu agreeing; the iPad back on "Connect to a Mac" |

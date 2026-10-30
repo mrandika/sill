@@ -1284,7 +1284,7 @@ thumbnail strip, as the Menus button (#36) takes its own.
 | H8 | **Epochs and segments** in the harness: the tone paused for 50 ms, then for 500 ms (`SILL_TEST_AUDIO_PAUSE=0.05@3,0.5@6`), and a source change | Each pause: nothing sent for the gap, a segment start at the resumed chunk placed at its stamp ±1 ms, no packet sent more than 40 ms after its stamp, and audiocheck's model keeps its jitter cover; the source change: a new epoch, its format before its first packet on every client |
 | H9 | **Compatibility.** The base's `sillclient.py` against an `--audio` host; the base's StreamProtocol (swiftc) against a kind 43 header and the new kind 16; the new device decoder against the base host's messages | No kind 43 to the old client; `.unknown`; the old kind 16 decode ignores the keys; nothing new decoded |
 | H10 | **Previews.** The bare app's `-SillRenderPreviews` before and after | Only the Streaming and Permissions panes, menu.txt's Send Audio and the new `sound` card sample differ |
-| H11 | **Hard rules** (grep) | No `captureMicrophone`, `AudioHardwareCreateProcessTap`, `updateConfiguration` or `assumeIsolated` in Sources/SillHost; no `UIBackgroundModes` in the iOS Info.plist; `HostConfig.standard` has `sendAudio: false`; the sound's send path never calls the counting `send(_:to:isFrame:isKeyframe:)` and never touches `keyframesInFlight` or `backlogFloor`; no AVFoundation or CoreMedia import in AudioEncoder, AudioPacketizer, AudioPipeline or SyntheticAudio; no render block in iOSClient; `-SillSoundSink` and `-SillSoundVolume` only under `#if DEBUG` |
+| H11 | **Hard rules** (grep) | No `captureMicrophone`, `updateConfiguration` or `assumeIsolated` in Sources/SillHost; no `UIBackgroundModes` in the iOS Info.plist; `HostConfig.standard` has `sendAudio: false`; the sound's send path never calls the counting `send(_:to:isFrame:isKeyframe:)` and never touches `keyframesInFlight` or `backlogFloor`; no AVFoundation or CoreMedia import in AudioEncoder, AudioPacketizer, AudioPipeline or SyntheticAudio; no render block in iOSClient; `-SillSoundSink` and `-SillSoundVolume` only under `#if DEBUG` |
 | H12 | **Cost.** The harness host's CPU (`ps`, 60 s) with and without sound | At most 1.5 percentage points more |
 
 **The harness** (`Scripts/audio/`, step 4) is built the way Scripts/pacing/build.sh builds its host:
@@ -1401,7 +1401,19 @@ Commit messages end with the session's attribution lines.
 
 ### 14. What comes later
 
-- **A quiet Mac.** A Core Audio process tap (macOS 14.2 and later) with `CATapMutedWhenTapped` in
+- **A quiet Mac (built, off by default: Settings › General's "Play sound on the device only",
+  `HostConfig.deviceOnlySound`, the CLI's `--audio-device-only`).** `AudioTapCapture` makes the tap with
+  `CATapMutedWhenTapped` (a global tap but Sill's own process for the Desktop; the streamed app's
+  processes, by pid and by bundle ID, helpers included, for a window), read through a private aggregate
+  device. The Mac is silent for what is tapped only while the tap is read: `stop()`, the process ending,
+  or the output device changing gives it back. An app with no audio process yet is waited for (the
+  process list is watched; a helper that comes later makes the tap again). Needs macOS 14.2 and
+  System Audio Recording (`NSAudioCaptureUsageDescription`; macOS asks on the first start, which waits
+  for the answer off the main actor); until it is granted the tap delivers silence and mutes nothing,
+  and one line says so after 15 s. A change of the setting starts the sound's stream again
+  (`AudioPipeline.follow(force:)`); the picture never notices. Not run by any test here; the device
+  tests are Noah's. Originally planned:
+  A Core Audio process tap (macOS 14.2 and later) with `CATapMutedWhenTapped` in
   place of ScreenCaptureKit's sound, so the Mac goes silent while a device plays; it needs its own
   permission ("System Audio Recording Only"). Then Send Audio could be on by default (Q1, Q6).
 - **A path of its own for the sound.** A send queue with priorities (Sill hands the connection only

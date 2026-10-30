@@ -98,6 +98,14 @@ final class InputOverlayView: UIView, UITextInput, UIGestureRecognizerDelegate {
     private let strokes = StrokeObserver()
     /// The finger pan, for where a scroll that a stroke's silence closes ends.
     private weak var scrollPan: UIPanGestureRecognizer?
+    /// Whether this session's Mac takes a pinch (`WindowList.magnify`): without it no pinch is
+    /// recognized and the two fingers scroll as before.
+    var magnifyAvailable: () -> Bool = { false }
+    private weak var pinch: UIPinchGestureRecognizer?
+    /// True between the `.magnify(.began)` this view sent and its `.ended`.
+    private var magnifyOpen = false
+    /// The pinch's scale when the last event was sent, so each event carries only its own change.
+    private var lastPinchScale: CGFloat = 1
     /// The iPad's trackpad (two fingers) or a Magic Mouse, and a mouse's wheel: scroll events over the
     /// picture, which carry no touch (`handleTrackpadScroll`, `handleWheel`).
     private weak var trackpadScroll: UIPanGestureRecognizer?
@@ -143,10 +151,18 @@ final class InputOverlayView: UIView, UITextInput, UIGestureRecognizerDelegate {
         tap.allowedTouchTypes = directOnly
         addGestureRecognizer(tap)
 
+        // A touch and hold is the held left button, as a mouse's: it presses where the finger is and
+        // keeps the button down while the finger moves (select text, drag a window or a file), and lets
+        // go when the finger lifts. The right button is a tap with two fingers.
         let longPress = UILongPressGestureRecognizer(target: self, action: #selector(handleLongPress))
         longPress.minimumPressDuration = 0.45
         longPress.allowedTouchTypes = directOnly
         addGestureRecognizer(longPress)
+
+        let twoFingerTap = UITapGestureRecognizer(target: self, action: #selector(handleTwoFingerTap))
+        twoFingerTap.numberOfTouchesRequired = 2
+        twoFingerTap.allowedTouchTypes = directOnly
+        addGestureRecognizer(twoFingerTap)
 
         // One or two fingers scroll; the Mac gets the content delta, not a drag.
         let pan = UIPanGestureRecognizer(target: self, action: #selector(handlePan))
@@ -177,6 +193,18 @@ final class InputOverlayView: UIView, UITextInput, UIGestureRecognizerDelegate {
             addGestureRecognizer(scroll)
             if mask == .continuous { trackpadScroll = scroll } else { wheelScroll = scroll }
         }
+
+        // Two fingers pinching: the Mac's magnify gesture (zoom in Maps, Preview, Safari, Photos). It
+        // recognizes beside the finger pan, as on a Mac's trackpad, and goes on beside it
+        // (zoom while moving).
+        let pinch = UIPinchGestureRecognizer(target: self, action: #selector(handlePinch))
+        // Fingers on the glass, and the iPad's trackpad: its pinch arrives as a pinch gesture with no
+        // touches (or indirect-pointer ones), which this recognizer takes. Two touches are needed to
+        // pinch, so the Pencil and a mouse's click never begin it.
+        pinch.allowedTouchTypes = [UITouch.TouchType.direct, .indirectPointer, .indirect, .pencil].map { NSNumber(value: $0.rawValue) }
+        pinch.delegate = self
+        addGestureRecognizer(pinch)
+        self.pinch = pinch
 
         // Three fingers or more: a gesture for the Mac, never a click, a right click or a scroll
         // (StrokeObserver, TrackpadGestures). It only watches: it takes no touch from the
@@ -268,11 +296,51 @@ final class InputOverlayView: UIView, UITextInput, UIGestureRecognizerDelegate {
         sendPointer(.leftUp, at: point, clamped: false)
     }
 
-    /// Long press: the right button, since there is no second finger to spare for it. What is composed
-    /// goes, and what was typed is forgotten, only past the letterbox's guard, as for a tap.
+    /// Touch and hold: the left button goes down where the finger is and stays down while it moves, then
+    /// comes up where it lifts, so the Mac sees a held button and a drag. UIKit's long press keeps
+    /// reporting the finger once it has begun, and fails the finger pan, so a hold never also scrolls.
+    /// What is composed goes, and what was typed is forgotten, only past the letterbox's guard, as for a tap.
     @objc private func handleLongPress(_ gesture: UILongPressGestureRecognizer) {
-        guard !strokes.silent else { return }
-        guard gesture.state == .began else { return }
+        let point = gesture.location(in: self)
+        switch gesture.state {
+        case .began:
+            guard !strokes.silent else { return }
+            setOwnPointer(nil, .none)
+            guard sendPointer(.move, at: point, clamped: false) != nil else { return }
+            forgetTyped()
+            sendPointer(.leftDown, at: point, clamped: false)
+            holdOpen = true
+            holdLast = point
+        case .changed:
+            guard holdOpen else { return }
+            holdLast = point
+            sendPointer(.move, at: point, clamped: true)
+        case .ended:
+            closeHold(at: point)
+        case .cancelled, .failed:
+            closeHold(at: holdLast ?? point)
+        default:
+            break
+        }
+    }
+
+    /// True between the `.leftDown` a touch and hold sent and its `.leftUp`.
+    private var holdOpen = false
+    private var holdLast: CGPoint?
+
+    /// Lets go of the button a hold has down, where the finger last was; nothing if none is down. Also for
+    /// everything that ends a hold without the finger lifting: three fingers landing (a Mac gesture),
+    /// the view leaving the screen, a system cancel.
+    private func closeHold(at point: CGPoint) {
+        guard holdOpen else { return }
+        holdOpen = false
+        holdLast = nil
+        sendPointer(.leftUp, at: point, clamped: true)
+    }
+
+    /// A tap with two fingers: the right button, where they are (their midpoint), as a trackpad's.
+    @objc private func handleTwoFingerTap(_ gesture: UITapGestureRecognizer) {
+        guard !strokes.silent, gesture.state == .ended else { return }
         setOwnPointer(nil, .none)
         let point = gesture.location(in: self)
         guard sendPointer(.move, at: point, clamped: false) != nil else { return }
@@ -295,10 +363,42 @@ final class InputOverlayView: UIView, UITextInput, UIGestureRecognizerDelegate {
         if gesture.state == .began {
             zoomStroke.panBegan()
             fingerScroll = zoomStroke.scrollsMac
+            // Immersive's top edge (docs/immersive-plan.md): a drag that began within 20 pt of the
+            // screen's top and goes mostly down reveals the bar, and none of it scrolls the Mac.
+            edgeSwipeTaken = edgeSwipe(gesture)
+        }
+        if edgeSwipeTaken {
+            if gesture.state == .ended || gesture.state == .cancelled || gesture.state == .failed {
+                edgeSwipeTaken = false
+                fingerScroll = false
+            }
+            return
         }
         guard fingerScroll else { return }
         if gesture.state == .ended || gesture.state == .cancelled { fingerScroll = false }
         scroll(gesture, .finger)
+    }
+
+    /// The finger pan in progress revealed Immersive's bar (`edgeSwipe`): the rest of it is not a scroll.
+    private var edgeSwipeTaken = false
+    /// Where the finger pan's first finger landed, in the window's space.
+    private var panLanding: CGPoint?
+
+    /// Whether the pan beginning now is Immersive's edge swipe, and if so, the bar revealed: only while
+    /// Immersive applies (`keyboardProxy.immersiveActive`), judged in the window's space, which is the
+    /// screen's while Immersive applies (it applies only when Sill fills the screen).
+    private func edgeSwipe(_ gesture: UIPanGestureRecognizer) -> Bool {
+        // From where the finger landed (`panLanding`) to where the pan begins: UIKit begins it only
+        // after the finger has moved, and with a translation of zero.
+        guard let proxy = keyboardProxy, proxy.immersiveActive, let window, let start = panLanding else { return false }
+        let now = gesture.location(in: window)
+        guard ImmersivePolicy.revealsFromEdge(startY: Double(start.y), dx: Double(now.x - start.x), dy: Double(now.y - start.y))
+        else { return false }
+        #if DEBUG
+        print("immersive: the top edge's swipe (from \(Int(start.y.rounded())) pt), not a scroll")
+        #endif
+        proxy.immersiveEdge?()
+        return true
     }
 
     /// Every direct touch on the picture, from the stroke observer: who the stroke belongs to, and while
@@ -351,15 +451,48 @@ final class InputOverlayView: UIView, UITextInput, UIGestureRecognizerDelegate {
         }
     }
 
+    /// Whether the trackpad stroke in progress is a Control swipe (begun with Control held while the
+    /// switch is on), and whether it has already gone to the Mac.
+    private var inControlSwipe = false
+    private var controlSwipeSent = false
+
+    /// A trackpad stroke made with Control held is one of the four swipes, not a scroll: nothing of it
+    /// is scrolled, and it goes once, as soon as it has moved far enough (`TrackpadGestures.controlSwipe`).
+    /// True when the stroke is one. Control is read when the stroke begins.
+    private func controlSwipe(_ gesture: UIPanGestureRecognizer) -> Bool {
+        if gesture.state == .began {
+            inControlSwipe = Self.trackpadControlSwipe && gesture.modifierFlags.contains(.control)
+            controlSwipeSent = false
+        }
+        guard inControlSwipe else { return false }
+        if !controlSwipeSent, gesture.state == .changed || gesture.state == .ended {
+            let sign: CGFloat = Self.reverseTrackpadScroll ? -1 : 1
+            let t = gesture.translation(in: self)
+            if let swipe = TrackpadGestures.controlSwipe(translation: CGPoint(x: t.x * sign, y: t.y * sign)) {
+                controlSwipeSent = true
+                _ = sendGesture(swipe, 3)
+            }
+        }
+        if gesture.state == .ended || gesture.state == .cancelled || gesture.state == .failed { inControlSwipe = false }
+        return true
+    }
+
     private func scroll(_ gesture: UIPanGestureRecognizer, _ source: ScrollSource) {
+        if source == .trackpad, controlSwipe(gesture) { return }
         scroll(gesture.state, at: gesture.location(in: self), translation: gesture.translation(in: self),
                velocity: gesture.state == .ended ? gesture.velocity(in: self) : .zero, from: source)
     }
 
     /// Every scroll on the picture, finger, trackpad or wheel: `state`, where it is (the finger, or the
     /// pointer), its translation since it began and, at its end, its velocity (points per second).
-    func scroll(_ state: UIGestureRecognizer.State, at location: CGPoint, translation: CGPoint,
-                velocity: CGPoint, from source: ScrollSource) {
+    func scroll(_ state: UIGestureRecognizer.State, at location: CGPoint, translation rawTranslation: CGPoint,
+                velocity rawVelocity: CGPoint, from source: ScrollSource) {
+        // A trackpad's or a wheel's direction is the iPad's own (Settings › Trackpad › Natural
+        // Scrolling, applied before the pan sees it; nothing public says which it is): Reverse
+        // Trackpad Scrolling turns it round for the Mac. A finger's is always natural.
+        let sign: CGFloat = source != .finger && Self.reverseTrackpadScroll ? -1 : 1
+        let translation = CGPoint(x: rawTranslation.x * sign, y: rawTranslation.y * sign)
+        let velocity = CGPoint(x: rawVelocity.x * sign, y: rawVelocity.y * sign)
         switch state {
         case .began:
             setOwnPointer(nil, .none)
@@ -411,6 +544,60 @@ final class InputOverlayView: UIView, UITextInput, UIGestureRecognizerDelegate {
         send(.scroll(x: p.x, y: p.y, dx: Double(dx) * scrollFactor, dy: Double(dy) * scrollFactor))
     }
 
+    // MARK: Pinch
+
+    @objc private func handlePinch(_ gesture: UIPinchGestureRecognizer) {
+        let finished = gesture.state == .ended || gesture.state == .cancelled || gesture.state == .failed
+        guard !strokes.silent else {
+            if finished { closePinch(at: gesture.location(in: self)) }
+            return
+        }
+        // A trackpad's pinch has no touches and is at the pointer; a finger left of a touch pinch keeps
+        // the place the pair was at.
+        let location = gesture.numberOfTouches == 1 ? (lastPinchLocation ?? gesture.location(in: self)) : gesture.location(in: self)
+        lastPinchLocation = location
+        switch gesture.state {
+        case .began:
+            guard magnifyAvailable(), let p = normalized(location, clamped: true) else { return }
+            // The scroll the two fingers may be making goes on (`endScrollForPinch`).
+            endScrollForPinch(at: location)
+            setOwnPointer(nil, .none)
+            lastPinchScale = gesture.scale
+            magnifyOpen = true
+            send(.magnify(.began, x: p.x, y: p.y, amount: 0))
+        case .changed:
+            guard magnifyOpen, let p = normalized(location, clamped: true) else { return }
+            let scale = gesture.scale
+            guard scale > 0, lastPinchScale > 0 else { return }
+            let amount = Double(scale / lastPinchScale - 1)
+            lastPinchScale = scale
+            guard amount != 0 else { return }
+            send(.magnify(.changed, x: p.x, y: p.y, amount: amount))
+        case .ended, .cancelled, .failed:
+            closePinch(at: location)
+        default:
+            break
+        }
+    }
+
+    private var lastPinchLocation: CGPoint?
+
+    /// Ends the pinch the Mac has open, wherever the fingers last were; nothing if none is.
+    private func closePinch(at location: CGPoint) {
+        lastPinchLocation = nil
+        guard magnifyOpen else { return }
+        magnifyOpen = false
+        let p = normalized(location, clamped: true) ?? (x: 0.5, y: 0.5)
+        send(.magnify(.ended, x: p.x, y: p.y, amount: 0))
+    }
+
+    /// A new pinch ends the coast of an earlier flick, as a new pan does. The scroll the two fingers are
+    /// making goes on beside the pinch: the pan follows the fingers' midpoint and the pinch their
+    /// spread, so a gesture can zoom while it moves, as a Mac trackpad's does (Maps, Photos).
+    private func endScrollForPinch(at location: CGPoint) {
+        momentum.stop()
+    }
+
     // MARK: Which recognizer may scroll
 
     /// One scroll at a time: none of the finger pan, the trackpad's and the wheel's begins while
@@ -420,13 +607,19 @@ final class InputOverlayView: UIView, UITextInput, UIGestureRecognizerDelegate {
         if gestureRecognizer === scrollPan || gestureRecognizer === trackpadScroll || gestureRecognizer === wheelScroll {
             return !scrollGestureOpen
         }
+        if gestureRecognizer === pinch { return magnifyAvailable() && !strokes.silent }
         return super.gestureRecognizerShouldBegin(gestureRecognizer)
     }
 
     /// The pointer's scrolls take scroll events only: no touch at all (UIKit asks this for touches, not
     /// for scroll events).
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
-        !(gestureRecognizer === trackpadScroll || gestureRecognizer === wheelScroll)
+        // The finger pan's first finger, where it landed: Immersive's edge swipe is judged from there
+        // (`edgeSwipe`), the pan's own `.began` coming only after it has moved.
+        if gestureRecognizer === scrollPan, gestureRecognizer.numberOfTouches == 0 {
+            panLanding = touch.location(in: window)
+        }
+        return !(gestureRecognizer === trackpadScroll || gestureRecognizer === wheelScroll)
     }
 
     /// The pointer's scrolls and its hover run together: the pointer rests over the picture while two
@@ -434,6 +627,11 @@ final class InputOverlayView: UIView, UITextInput, UIGestureRecognizerDelegate {
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
                            shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
         let scrolls = [trackpadScroll, wheelScroll].compactMap { $0 }
+        // The pinch and the finger pan recognize together and stay together: two fingers zoom while
+        // they move (the pan follows their midpoint, the pinch their spread).
+        for pan in [scrollPan, trackpadScroll] {
+            if (gestureRecognizer === pinch && other === pan && pan != nil) || (gestureRecognizer === pan && pan != nil && other === pinch) { return true }
+        }
         return (scrolls.contains { $0 === gestureRecognizer } && other === hover)
             || (scrolls.contains { $0 === other } && gestureRecognizer === hover)
     }
@@ -443,6 +641,7 @@ final class InputOverlayView: UIView, UITextInput, UIGestureRecognizerDelegate {
     /// than `chordTravel`. Nothing else of the stroke goes out but its gesture, and a picture its first
     /// two fingers had pinched goes back to how the stroke found it (StreamZoom.Stroke).
     private func strokeSilenced() {
+        if let held = holdLast { closeHold(at: held) }
         lastPanTranslation = .zero
         fingerScroll = false
         var z = zoom
@@ -476,7 +675,12 @@ final class InputOverlayView: UIView, UITextInput, UIGestureRecognizerDelegate {
 
     override func didMoveToWindow() {
         super.didMoveToWindow()
-        if window == nil { momentum.stop(); releaseForwardedKeys(); commitComposition("left its window") }
+        if window == nil {
+            momentum.stop()
+            releaseForwardedKeys()
+            commitComposition("left its window")
+            if let held = holdLast { closeHold(at: held) }
+        }
         // A session's start, a rotation's other layout, a reconnect's new screen: the proxy takes the
         // keyboard for a hardware keyboard (on the next turn, once this view is settled in the window).
         if window != nil { keyboardProxy?.joined(self) } else { keyboardProxy?.left(self) }
@@ -721,6 +925,7 @@ final class InputOverlayView: UIView, UITextInput, UIGestureRecognizerDelegate {
     func insertText(_ text: String) {
         Self.textinput("insertText \(text.debugDescription)" + (composition.isComposing ? " over the composition" : "")
                        + (composition.retype.isEmpty ? "" : ", after a deletion that left \(composition.retype.debugDescription) before the fence"))
+        guard acceptsText(text) else { return }
         setOwnPointer(nil, .none)
         if !composition.isComposing, !latchedModifiers.isDisjoint(with: .shortcutMakers), text.count == 1,
            let character = text.first, let usage = HIDKey.usage(for: character) {
@@ -744,6 +949,7 @@ final class InputOverlayView: UIView, UITextInput, UIGestureRecognizerDelegate {
 
     func deleteBackward() {
         Self.textinput("deleteBackward" + (composition.isComposing ? " in the composition" : ""))
+        guard acceptsText("\u{8}") else { return }
         setOwnPointer(nil, .none)
         if !composition.isComposing, !latchedModifiers.isDisjoint(with: .shortcutMakers) {
             sendLatched(HIDKey.deleteBackward)
@@ -929,13 +1135,70 @@ final class InputOverlayView: UIView, UITextInput, UIGestureRecognizerDelegate {
     private var takesEscape: Bool { isFirstResponder && !composition.isComposing && !EscapeKey.onScreen(in: window) }
 
     override var keyCommands: [UIKeyCommand]? {
-        guard takesEscape else { return super.keyCommands }
-        return (super.keyCommands ?? []) + Self.escapeCommands
+        var commands = super.keyCommands ?? []
+        if takesEscape { commands += Self.escapeCommands }
+        if takesImmersiveToggle { commands.append(Self.immersiveCommand) }
+        return commands.isEmpty ? super.keyCommands : commands
     }
 
     override func canPerformAction(_ action: Selector, withSender sender: Any?) -> Bool {
         if action == #selector(InputOverlayView.escapeKeyCommand(_:)) { return takesEscape }
+        if action == #selector(InputOverlayView.immersiveKeyCommand(_:)) { return takesImmersiveToggle }
         return super.canPerformAction(action, withSender: sender)
+    }
+
+    // MARK: Immersive's shortcut (docs/immersive-plan.md)
+
+    /// ⌃⌥⌘B shows or hides the bar while Immersive applies, and never reaches the Mac (R5). Two ways
+    /// in, as Esc's: this command, with priority over the system's own handling and titled for the
+    /// ⌘ list and the menu bar, and `pressesBegan` (`takeImmersiveToggle`), whichever comes first;
+    /// one press toggles once. While Immersive does not apply the chord is the Mac's like any other.
+    private static let immersiveCommand: UIKeyCommand = {
+        let command = UIKeyCommand(title: "Show or Hide the Sill Bar", action: #selector(InputOverlayView.immersiveKeyCommand(_:)),
+                                   input: "b", modifierFlags: [.control, .alternate, .command])
+        command.wantsPriorityOverSystemBehavior = true
+        return command
+    }()
+
+    /// This view takes the chord: it holds the keyboard and Immersive applies.
+    private var takesImmersiveToggle: Bool { isFirstResponder && keyboardProxy?.immersiveActive == true }
+
+    /// The chord's keys taken from pressesBegan, so their ups are taken too.
+    private var immersiveKeysDown: Set<UInt16> = []
+    /// When the chord last toggled, so the command and pressesBegan never both do for one press.
+    private var immersiveToggledAt: TimeInterval = -1
+
+    @objc private func immersiveKeyCommand(_ command: UIKeyCommand) {
+        guard takesImmersiveToggle else { return }
+        toggleImmersive(via: "keyCommand")
+    }
+
+    private func toggleImmersive(via channel: String) {
+        let now = ProcessInfo.processInfo.systemUptime
+        guard now - immersiveToggledAt > 0.2 else {
+            Self.hwkey(ImmersivePolicy.toggleUsage, down: true, via: channel, to: "the bar's shortcut, already toggled")
+            return
+        }
+        immersiveToggledAt = now
+        Self.hwkey(ImmersivePolicy.toggleUsage, down: true, via: channel, to: "the bar's shortcut")
+        keyboardProxy?.immersiveToggle?()
+    }
+
+    /// The presses that are not Immersive's chord: the chord itself (down, and later its up) toggles
+    /// the bar here and goes no further, while Immersive applies.
+    private func takeImmersiveToggle(_ presses: Set<UIPress>, down: Bool) -> Set<UIPress> {
+        guard down ? takesImmersiveToggle : !immersiveKeysDown.isEmpty else { return presses }
+        return presses.filter { press in
+            guard let key = press.key else { return true }
+            let usage = UInt16(key.keyCode.rawValue)
+            if down {
+                guard ImmersivePolicy.isToggle(usage: usage, modifiers: UInt64(key.modifierFlags.rawValue)) else { return true }
+                immersiveKeysDown.insert(usage)
+                toggleImmersive(via: "pressesBegan")
+                return false
+            }
+            return immersiveKeysDown.remove(usage) == nil
+        }
     }
 
     /// Esc to the Mac, down and up at once with the command's modifiers, through `ForwardedKeys` as a
@@ -1005,6 +1268,22 @@ final class InputOverlayView: UIView, UITextInput, UIGestureRecognizerDelegate {
 
     /// The hardware keys down on the Mac, so each one's up follows its down.
     private var forwarded = ForwardedKeys()
+    /// This device's switch: the left Option key is Command on the Mac (ForwardedKeys), since iPadOS
+    /// keeps ⌘Space and ⌘Tab for itself. Off unless turned on; never sent to the Mac.
+    /// Reverse Trackpad Scrolling (Settings › This iPad): turns round the direction a trackpad's or a
+    /// wheel's scroll arrives in, which is the iPad's own. Off unless turned on, read at each event,
+    /// never sent.
+<<<<<<< Updated upstream
+=======
+    /// Control + a two-finger trackpad stroke as the four swipes (Spaces, Mission Control, App Exposé):
+    /// off unless turned on, read at each stroke, never sent. Needs the Mac to take gestures.
+    static let trackpadControlSwipeKey = "Sill.trackpadControlSwipe"
+    static var trackpadControlSwipe: Bool { UserDefaults.standard.bool(forKey: trackpadControlSwipeKey) }
+>>>>>>> Stashed changes
+    static let reverseTrackpadScrollKey = "Sill.reverseTrackpadScroll"
+    static var reverseTrackpadScroll: Bool { UserDefaults.standard.bool(forKey: reverseTrackpadScrollKey) }
+    static let leftOptionAsCommandKey = "Sill.leftOptionAsCommand"
+    static var leftOptionAsCommand: Bool { UserDefaults.standard.bool(forKey: leftOptionAsCommandKey) }
 
     private func forward(_ presses: Set<UIPress>, down: Bool, via channel: String) -> Set<UIPress> {
         var unhandled: Set<UIPress> = []
@@ -1031,16 +1310,27 @@ final class InputOverlayView: UIView, UITextInput, UIGestureRecognizerDelegate {
                 unhandled.insert(press)
                 continue
             }
+            if down { forwarded.leftOptionAsCommand = Self.leftOptionAsCommand }
             let outcome = down ? forwarded.pressed(usage, modifiers: modifiers, at: press.timestamp) : forwarded.released(usage)
             switch outcome {
             case .send(let event):
                 if down { forgetTyped() }
                 send(event)
+                if case .key(let sent, let isDown, _) = event {
+                    if isDown, KeyRepeat.repeats(sent) { startKeyRepeat(.key(usage: sent, event: event)) }
+                    if !isDown, repeating?.usage == sent || repeating?.usage == usage { stopKeyRepeat() }
+                }
                 Self.hwkey(usage, down: down, via: channel, modifiers: modifiers, to: "to the Mac")
             case .text:
+                if down {
+                    if KeyRepeat.repeats(usage) { stopKeyRepeat(); textKeyHeld = usage; textKeyAnswered = false }
+                } else if textKeyHeld == usage || repeating?.usage == usage {
+                    stopKeyRepeat()
+                }
                 unhandled.insert(press)
                 Self.hwkey(usage, down: down, via: channel, modifiers: modifiers, to: "the text system's")
             case .swallow:
+                if !down, repeating?.usage == usage { stopKeyRepeat() }
                 Self.hwkey(usage, down: down, via: channel, modifiers: modifiers, to: "the key command sent it")
             }
         }
@@ -1061,11 +1351,15 @@ final class InputOverlayView: UIView, UITextInput, UIGestureRecognizerDelegate {
             super.pressesBegan(presses, with: event)
             return
         }
+        let presses = takeImmersiveToggle(presses, down: true)
+        guard !presses.isEmpty else { return }
         let unhandled = forward(presses, down: true, via: "pressesBegan")
         if !unhandled.isEmpty { super.pressesBegan(unhandled, with: event) }
     }
 
     override func pressesEnded(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        let presses = takeImmersiveToggle(presses, down: false)
+        guard !presses.isEmpty else { return }
         let unhandled = forward(presses, down: false, via: "pressesEnded")
         if !unhandled.isEmpty { super.pressesEnded(unhandled, with: event) }
     }
@@ -1073,6 +1367,8 @@ final class InputOverlayView: UIView, UITextInput, UIGestureRecognizerDelegate {
     /// A press cancelled (the app going to the background, the keyboard disconnected): its key comes
     /// up on the Mac as if released, so neither it nor a modifier stays down there.
     override func pressesCancelled(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        let presses = takeImmersiveToggle(presses, down: false)
+        guard !presses.isEmpty else { return }
         let unhandled = forward(presses, down: false, via: "pressesCancelled")
         if !unhandled.isEmpty { super.pressesCancelled(unhandled, with: event) }
     }
@@ -1081,7 +1377,70 @@ final class InputOverlayView: UIView, UITextInput, UIGestureRecognizerDelegate {
     /// panel took the keyboard, the tour showed) or is leaving the screen, and UIKit sends it no
     /// release for them.
     private func releaseForwardedKeys() {
+        stopKeyRepeat()
         for up in forwarded.releaseAll() { send(up) }
+    }
+
+    // MARK: Holding a key (KeyRepeat)
+
+    /// What a held hardware key sends again: its down as it went (a key the Mac gets as a key), or the
+    /// text the text system gave for it (a key that types).
+    private enum Repeating {
+        case key(usage: UInt16, event: InputEvent)
+        case text(usage: UInt16, text: String)
+        var usage: UInt16 {
+            switch self { case .key(let usage, _), .text(let usage, _): return usage }
+        }
+    }
+    private var repeating: Repeating?
+    private var repeatTimer: DispatchSourceTimer?
+    /// The text key held right now whose press the text system has not yet answered with text, and
+    /// whether it has (`textKeyHeld`): the text system's own repeats of it are dropped, this view's
+    /// replace them, so a key never repeats twice over.
+    private var textKeyHeld: UInt16?
+    private var textKeyAnswered = false
+
+    private func startKeyRepeat(_ what: Repeating) {
+        stopKeyRepeat()
+        repeating = what
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(deadline: .now() + KeyRepeat.delay, repeating: KeyRepeat.interval)
+        timer.setEventHandler { [weak self] in self?.repeatTick() }
+        repeatTimer = timer
+        timer.resume()
+    }
+
+    private func stopKeyRepeat() {
+        repeatTimer?.cancel()
+        repeatTimer = nil
+        repeating = nil
+        textKeyHeld = nil
+        textKeyAnswered = false
+    }
+
+    private func repeatTick() {
+        switch repeating {
+        case .key(let usage, let event)?:
+            // The press went up on the Mac by another way (a release, the overlay letting go).
+            guard forwarded.down.contains(usage) else { stopKeyRepeat(); return }
+            send(event)
+        case .text(_, let text)?:
+            send(.text(text))
+        case nil:
+            stopKeyRepeat()
+        }
+    }
+
+    /// A text key's first text: it starts the key repeating; any more while it is held are the
+    /// system's own repeats, which are dropped (`false`).
+    private func acceptsText(_ text: String) -> Bool {
+        guard let usage = textKeyHeld else { return true }
+        guard !textKeyAnswered else { return false }
+        textKeyAnswered = true
+        startKeyRepeat(.text(usage: usage, text: text))
+        textKeyHeld = usage
+        textKeyAnswered = true
+        return true
     }
 }
 
@@ -1296,6 +1655,11 @@ final class InputOverlayProxy {
     /// The person's own keyboard came up or went: the Keyboard button lights, the tour counts it.
     /// The hardware keyboard's holding never calls it.
     var onOwnChange: ((Bool) -> Void)?
+    /// Immersive applies (StreamScreen, docs/immersive-plan.md): the input view takes ⌃⌥⌘B and the top
+    /// edge's swipe for the bar, through these, instead of sending them to the Mac.
+    var immersiveActive = false
+    var immersiveToggle: (() -> Void)?
+    var immersiveEdge: (() -> Void)?
 
     /// The Keyboard button (and the portrait key row's keyboard cap).
     func toggleKeyboard() { change("the Keyboard button") { $0.toggled() } }
@@ -1446,6 +1810,8 @@ struct InputOverlay: UIViewRepresentable {
     /// view.
     var readZoom: (() -> StreamZoom)? = nil
     var writeZoom: ((StreamZoom) -> Void)? = nil
+    /// Whether the Mac takes a pinch (`StreamClient.hostMagnify`); see `InputOverlayView.magnifyAvailable`.
+    var magnifyAvailable: () -> Bool = { false }
 
     func makeUIView(context: Context) -> InputOverlayView {
         let view = InputOverlayView(frame: .zero)
@@ -1462,6 +1828,7 @@ struct InputOverlay: UIViewRepresentable {
         uiView.sendGesture = sendGesture
         uiView.readZoom = readZoom
         uiView.writeZoom = writeZoom
+        uiView.magnifyAvailable = magnifyAvailable
         // Called straight from a UIKit text-input callback, never from inside a SwiftUI update,
         // so writing the binding here needs no hop.
         uiView.onModifiersConsumed = onModifiersConsumed

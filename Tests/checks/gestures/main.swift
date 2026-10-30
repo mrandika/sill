@@ -860,5 +860,19 @@ check("5,000 random strokes (\(tallies.sorted { $0.key < $1.key }.map { "\($0.ke
 check("the random strokes reach every gesture, with three fingers and with four", G.Gesture.allCases.allSatisfy { g in tallies["\(g.rawValue)3"] != nil }
       && tallies.keys.contains { $0.hasSuffix("4") })
 
+// MARK: - Control + a two-finger trackpad stroke
+
+func cs(_ x: CGFloat, _ y: CGFloat) -> G.Gesture? { G.controlSwipe(translation: CGPoint(x: x, y: y)) }
+check("control swipe: left", cs(-80, 5) == .swipeLeft)
+check("control swipe: right", cs(80, -5) == .swipeRight)
+check("control swipe: up", cs(3, -90) == .swipeUp)
+check("control swipe: down", cs(-3, 90) == .swipeDown)
+check("control swipe: too short is nothing", cs(-59, 0) == nil && cs(0, 59) == nil)
+check("control swipe: exactly the threshold goes", cs(60, 0) == .swipeRight)
+check("control swipe: a diagonal is nothing", cs(80, 70) == nil)
+check("control swipe: dominance 1.5 goes", cs(90, 60) == .swipeRight)
+check("control swipe: just under dominance is nothing", cs(89, 60) == nil)
+check("control swipe: no movement", cs(0, 0) == nil)
+
 print("\(passes + fails) checks, \(fails) failed")
 exit(fails == 0 ? 0 : 1)

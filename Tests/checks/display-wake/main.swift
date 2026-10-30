@@ -101,9 +101,10 @@ for raw in 0...255 {
     eq(fresh.activity(msg(kind, kind == .input ? tap : nil), at: 100), personKinds[UInt8(raw)], "kind \(raw) (\(kind))")
 }
 // A kind added to the wire fails this until it is decided here (and in the rule).
-eq(kinds, 33, "every kind there is decided (a new kind: say here whether it is a person at the device)")
+eq(kinds, 37, "every kind there is decided (a new kind: say here whether it is a person at the device)")
 for (raw, what) in [(6, "a pick, the device's own Desktop request among them"), (9, "the viewport"), (17, "a settings change"),
                     (21, "show your pairing code"), (27, "a menu fetched"), (32, "the clipboard"),
+                    (34, "a file's chunk"), (35, "files dropped"), (45, "the device's microphone"), (46, "the device's camera"),
                     (43, "the Mac's sound, which only a host sends"), (44, "a keyframe request")] as [(UInt8, String)] {
     let kind = Kind(rawValue: raw)!
     eq(fresh.activity(msg(kind), at: 100), nil, "never kind \(raw), \(what)")

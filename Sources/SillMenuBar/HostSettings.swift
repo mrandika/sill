@@ -50,6 +50,8 @@ final class HostSettings {
         static let logShowsStats = "logShowsStats"
         static let updateCheck = "updateCheck"
         static let shareClipboard = "shareClipboard"
+        static let mirrorOtherDisplays = "mirrorOtherDisplays"
+        static let deviceOnlySound = "deviceOnlySound"
         static let sendAudio = "sendAudio"
         static let showPairingWindowToScreenSharing = "showPairingWindowToScreenSharing"
     }
@@ -137,8 +139,10 @@ final class HostSettings {
             Key.updateCheck: true,
             // On, like the CLI: each device has its own switch, and a password manager's copies never go.
             Key.shareClipboard: base.shareClipboard,
+            Key.mirrorOtherDisplays: false,
+            Key.deviceOnlySound: false,
             // On, unlike the CLI (Noah, 2026-10-27: "Send Audio should be on by default"); a saved key
-            // wins. The Mac keeps playing its own sound too.
+            // wins. The Mac keeps playing its own sound too, unless Play sound on the device only is on.
             Key.sendAudio: base.sendAudio,
             // Off: whoever can see this Mac's screen remotely could read a code (PairingWindowSharing).
             Key.showPairingWindowToScreenSharing: false,
@@ -168,6 +172,8 @@ final class HostSettings {
         askedScreenRecording = defaults.bool(forKey: Key.askedScreenRecording)
         askedAccessibility = defaults.bool(forKey: Key.askedAccessibility)
         logShowsStats = defaults.bool(forKey: Key.logShowsStats)
+        config.mirrorOtherDisplays = defaults.bool(forKey: Key.mirrorOtherDisplays)
+        config.deviceOnlySound = defaults.bool(forKey: Key.deviceOnlySound)
     }
 
     /// Writes only the keys that changed, so a launch-argument override of another key is not
@@ -185,6 +191,8 @@ final class HostSettings {
         if config.remotePort != old.remotePort { defaults.set(config.remotePort, forKey: Key.remotePort) }
         if config.internetAccess != old.internetAccess { defaults.set(config.internetAccess, forKey: Key.internetAccess) }
         if config.shareClipboard != old.shareClipboard { defaults.set(config.shareClipboard, forKey: Key.shareClipboard) }
+        if config.deviceOnlySound != old.deviceOnlySound { defaults.set(config.deviceOnlySound, forKey: Key.deviceOnlySound) }
+        if config.mirrorOtherDisplays != old.mirrorOtherDisplays { defaults.set(config.mirrorOtherDisplays, forKey: Key.mirrorOtherDisplays) }
         if config.sendAudio != old.sendAudio { defaults.set(config.sendAudio, forKey: Key.sendAudio) }
     }
 

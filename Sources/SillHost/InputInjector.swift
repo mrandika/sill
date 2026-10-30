@@ -102,6 +102,8 @@ final class InputInjector {
             scrollGesture(phase, at: point(x, y, in: rect))
         case .key(let hidUsage, let down, let modifiers):
             key(hidUsage: hidUsage, down: down, modifiers: modifiers, from: device)
+        case .magnify(let phase, let x, let y, let amount):
+            magnify(phase, at: point(x, y, in: rect), amount: amount)
         }
     }
 
@@ -129,6 +131,17 @@ final class InputInjector {
             Stats.shared.bump("in.dry")
             return false
         }
+        if event.type == .mouseMoved {
+            switch PointerPost.current {
+            case .hid: event.post(tap: .cghidEventTap)
+            case .session: event.post(tap: .cgSessionEventTap)
+            case .warp: CGWarpMouseCursorPosition(event.location)
+            case .warpAndHID:
+                CGWarpMouseCursorPosition(event.location)
+                event.post(tap: .cghidEventTap)
+            }
+            return true
+        }
         event.post(tap: .cghidEventTap)
         return true
     }
@@ -152,6 +165,10 @@ final class InputInjector {
         case .rightMouseUp: what = "right mouse up"
         case .rightMouseDragged: what = "right mouse drag"
         case .scrollWheel: what = Self.scrollTestText(event)
+        case Self.gestureEventType:
+            what = "magnify \(event.getDoubleValueField(Self.magnificationField))"
+            print("Test input: \(what) (phase \(event.getIntegerValueField(Self.gesturePhaseField)))")
+            return
         default: what = "event \(event.type.rawValue)"
         }
         // A button's event says where it goes: a button's up with no source goes where the pointer is.
@@ -192,6 +209,79 @@ final class InputInjector {
         return (true, "Test input log: each event this host would post is printed; a --synthetic host posts none.")
     }
 
+    // MARK: Magnify (a two-finger pinch)
+
+    /// The trackpad's magnify gesture has no public CGEvent constructor. It is the window server's
+    /// gesture event (NSEventTypeGesture, 29) with the subtype field set to magnify (8), the amount in
+    /// the magnification field and a phase around it, the fields AppKit reads for
+    /// `NSEvent.magnification` (private numbers, as `SymbolicHotKeys` and the virtual display are
+    /// private API; stable since OS X 10.7, but unverified here on macOS 27 with a real app).
+    private static let gestureEventType = CGEventType(rawValue: 29)!
+    private static let gestureSubtypeField = CGEventField(rawValue: 110)!
+    private static let magnificationField = CGEventField(rawValue: 113)!
+    private static let gesturePhaseField = CGEventField(rawValue: 132)!
+    private static let magnifySubtype: Int64 = 8
+    /// The gesture phases NSEvent reports: began, changed, ended.
+    private static func phaseValue(_ phase: MagnifyPhase) -> Int64 {
+        switch phase { case .began: return 1; case .changed: return 2; case .ended: return 4 }
+    }
+    /// A pinch whose closing message never comes (the device dropped off mid-pinch) would leave the
+    /// Mac's content held in a zoom gesture: it ends after this long without an event.
+    private static let magnifyIdleTimeout: Double = 1
+    private var magnifyOpen = false
+    private var magnifyAt = CGPoint.zero
+    private var magnifyWatchdog: Task<Void, Never>?
+    /// Bounds a single event: a device's amount is a fraction of the size, not more than a doubling.
+    private static let maxMagnification = 1.0
+
+    private func magnify(_ phase: MagnifyPhase, at location: CGPoint, amount rawAmount: Double) {
+        Stats.shared.bump("in.magnifyPhase")
+        guard rawAmount.isFinite else { return }
+        let amount = min(max(rawAmount, -Self.maxMagnification), Self.maxMagnification)
+        switch phase {
+        case .began:
+            if magnifyOpen { postMagnify(.ended, at: magnifyAt, amount: 0) }
+            // The pointer under the fingers first, as a hand on a trackpad has it: apps zoom about the
+            // cursor, and a finger sends no move before its pinch.
+            if hypot(pointerNow().x - location.x, pointerNow().y - location.y) > 1 { pointer(.move, at: location) }
+            magnifyOpen = true
+            postMagnify(.began, at: location, amount: amount)
+        case .changed:
+            guard magnifyOpen else { return }   // the begin was lost or the watchdog closed it
+            postMagnify(.changed, at: location, amount: amount)
+        case .ended:
+            guard magnifyOpen else { return }
+            magnifyOpen = false
+            postMagnify(.ended, at: location, amount: amount)
+        }
+        magnifyAt = location
+        rearmMagnifyWatchdog()
+    }
+
+    private func postMagnify(_ phase: MagnifyPhase, at location: CGPoint, amount: Double) {
+        guard let event = CGEvent(source: source) else { return }
+        event.type = Self.gestureEventType
+        event.location = location
+        event.setIntegerValueField(Self.gestureSubtypeField, value: Self.magnifySubtype)
+        event.setIntegerValueField(Self.gesturePhaseField, value: Self.phaseValue(phase))
+        event.setDoubleValueField(Self.magnificationField, value: amount)
+        watch?.sillMoved(to: location)   // before the post, as every pointer and scroll event (`watch`)
+        lastPointerLocation = location
+        if post(event) { Stats.shared.bump("in.magnify") }
+    }
+
+    private func rearmMagnifyWatchdog() {
+        magnifyWatchdog?.cancel()
+        guard magnifyOpen else { magnifyWatchdog = nil; return }
+        magnifyWatchdog = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(Self.magnifyIdleTimeout * 1_000_000_000))
+            guard !Task.isCancelled, let self, self.magnifyOpen else { return }
+            self.magnifyOpen = false
+            self.postMagnify(.ended, at: self.magnifyAt, amount: 0)
+            Stats.shared.bump("in.magnifyTimeout")
+        }
+    }
+
     // MARK: Pointer
 
     private func pointer(_ action: PointerAction, at location: CGPoint) {
@@ -223,11 +313,25 @@ final class InputInjector {
         guard let event = CGEvent(mouseEventSource: source, mouseType: type,
                                   mouseCursorPosition: location, mouseButton: button) else { return }
         if type != .mouseMoved { event.setIntegerValueField(.mouseEventClickState, value: clicks) }
+        // A move or drag carries how far it went; apps that read the deltas rather than the position
+        // (a drag in the iOS Simulator, a game, a virtual machine) see none from the constructor.
+        if type == .mouseMoved || type == .leftMouseDragged || type == .rightMouseDragged {
+            // The first event after a long jump (or from nowhere) has no meaningful delta.
+            let dx = location.x - lastPointerLocation.x, dy = location.y - lastPointerLocation.y
+            let jump = hypot(dx, dy) > 300
+            event.setIntegerValueField(.mouseEventDeltaX, value: jump ? 0 : Int64(dx.rounded()))
+            event.setIntegerValueField(.mouseEventDeltaY, value: jump ? 0 : Int64(dy.rounded()))
+        }
         // One synthetic "finger": a constant event number keeps a down/drag/up sequence coherent.
         event.setIntegerValueField(.mouseEventNumber, value: 0)
         watch?.sillMoved(to: location)   // before the post (see `watch`); a dry run moves the scripted pointer
         lastPointerLocation = location
-        if post(event) { Stats.shared.bump("in.pointer") }
+        let began = CACurrentMediaTime()
+        if post(event) {
+            Stats.shared.bump("in.pointer")
+            // The window server answers a post late when it is busy: that holds the main actor too.
+            if CACurrentMediaTime() - began > 0.008 { Stats.shared.bump("in.post>8ms") }
+        }
     }
 
     /// Whether this input is the up of a key or a button the Mac has down, which still goes when the
@@ -278,9 +382,24 @@ final class InputInjector {
         if abs(scrollRemainder.x) >= 1 || abs(scrollRemainder.y) >= 1 { scrollRemainder = .zero }  // after a clamp
         let w1 = Int32(wheel1), w2 = Int32(wheel2)
 
+        // A scroll event carries its own location, which AppKit apps route by. An app that reads the
+        // cursor instead (the iOS Simulator, a virtual machine) scrolls where the cursor is, and a
+        // finger's scroll sends no move first, so the cursor is put under it before the gesture's
+        // first event, as a hand on a trackpad would have it.
+        switch scrollState {
+        case .idle, .gesture(begun: false):
+            let here = pointerNow()
+            if hypot(here.x - location.x, here.y - location.y) > 1 { pointer(.move, at: location) }
+        default: break
+        }
         switch scrollState {
         case .idle:
             postScroll(at: location, wheel1: w1, wheel2: w2, phase: nil, momentum: nil)
+        case .gesture where scrollAsDrag:
+            scrollByDragging(from: location, dx: dx, dy: dy)
+            scrollState = .gesture(begun: true)
+        case .momentum where scrollAsDrag:
+            break   // the app has its own coast from the drag's release
         case .gesture(let begun):
             postScroll(at: location, wheel1: w1, wheel2: w2,
                        phase: begun ? .changed : .began, momentum: nil)
@@ -324,6 +443,50 @@ final class InputInjector {
     /// Where the last scroll event went, for the closing event the watchdog posts.
     private var lastScrollLocation = CGPoint.zero
     private var scrollWatchdog: Task<Void, Never>?
+    /// This gesture is made into a drag of the left button: the iOS Simulator (Device Hub) ignores the
+    /// scroll-wheel events posted here but moves its content with a dragged touch. Decided where the
+    /// gesture begins, kept through its coast (which the app does itself on the drag's release).
+    private var scrollAsDrag = false
+    /// Where a scroll-as-drag holds the button; nil while it is up.
+    private var scrollDragAt: CGPoint?
+    private static let dragScrollOwners: Set<String> = ["Simulator", "Device Hub"]
+
+    /// Whether the topmost window under `location` belongs to the iOS Simulator.
+    private static func isSimulator(at location: CGPoint) -> Bool {
+        guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements],
+                                                    kCGNullWindowID) as? [[String: Any]] else { return false }
+        for window in list {   // front to back
+            guard (window[kCGWindowLayer as String] as? Int) == 0,
+                  (window[kCGWindowAlpha as String] as? Double ?? 1) > 0,
+                  let bounds = window[kCGWindowBounds as String] as? [String: Double],
+                  let x = bounds["X"], let y = bounds["Y"], let w = bounds["Width"], let h = bounds["Height"],
+                  CGRect(x: x, y: y, width: w, height: h).contains(location) else { continue }
+            return dragScrollOwners.contains(window[kCGWindowOwnerName as String] as? String ?? "")
+        }
+        return false
+    }
+
+    /// One step of a scroll made into a drag: the first presses where the scroll began, each moves the
+    /// held button by the delta (content follows the finger, as a scroll's sign says).
+    private func scrollByDragging(from location: CGPoint, dx: Double, dy: Double) {
+        var at = scrollDragAt ?? location
+        if scrollDragAt == nil {
+            left.lastDownAt = -1_000   // a scroll is never the second click of a double
+            pointer(.leftDown, at: at)
+            left.lastDownAt = -1_000
+            if !dryRun { Stats.shared.bump("in.scrollDrag") }
+        }
+        at.x += CGFloat(dx)
+        at.y += CGFloat(dy)
+        scrollDragAt = at
+        pointer(.move, at: at)
+    }
+
+    private func endScrollDrag() {
+        guard let at = scrollDragAt else { return }
+        scrollDragAt = nil
+        pointer(.leftUp, at: at)
+    }
 
     /// A gesture or coast whose closing message never comes (the client dropped off mid-scroll)
     /// would leave the Mac's content stretched past its edge indefinitely. If a gesture goes this
@@ -339,9 +502,12 @@ final class InputInjector {
             closeScroll(at: location)   // defensive: anything still open ends first
             scrollState = .gesture(begun: false)
             scrollRemainder = .zero
+            // Not while a button is held by a device's own drag, and not on a synthetic host.
+            scrollAsDrag = !left.isDown && !dryRun && Self.isSimulator(at: location)
         case .ended:
             if case .gesture(begun: true) = scrollState {
-                postScroll(at: location, wheel1: 0, wheel2: 0, phase: .ended, momentum: nil)
+                if scrollAsDrag { endScrollDrag() }
+                else { postScroll(at: location, wheel1: 0, wheel2: 0, phase: .ended, momentum: nil) }
             }
             scrollState = .idle
         case .momentumBegan:
@@ -361,7 +527,8 @@ final class InputInjector {
     private func closeScroll(at location: CGPoint) {
         switch scrollState {
         case .gesture(begun: true):
-            postScroll(at: location, wheel1: 0, wheel2: 0, phase: .ended, momentum: nil)
+            if scrollAsDrag { endScrollDrag() }
+            else { postScroll(at: location, wheel1: 0, wheel2: 0, phase: .ended, momentum: nil) }
         case .momentum(begun: true):
             postScroll(at: location, wheel1: 0, wheel2: 0, phase: nil, momentum: .end)
         default:
@@ -448,24 +615,39 @@ final class InputInjector {
             case "\t": tap(virtualKey: 48)          // Tab
             case "\u{8}": tap(virtualKey: 51)       // Delete (backspace)
             default:
-                // Virtual key 0 with a Unicode string: the character arrives whatever the Mac's
-                // keyboard layout is, which is what a software keyboard on the phone means.
+                // The key that types the character on the Mac's layout, when there is one, with the
+                // Unicode string beside it: an app that reads the keycode (the iOS Simulator, a VM, a
+                // game) gets the right key, and AppKit gets the string. Without such a key, virtual
+                // key 0 and the string alone, which arrives whatever the layout is.
+                let press = layoutKeys.press(for: character)
                 let units = Array(character.utf16)
-                guard let down = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true),
-                      let up = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: false) else { continue }
+                guard let down = CGEvent(keyboardEventSource: source, virtualKey: press?.virtualKey ?? 0, keyDown: true),
+                      let up = CGEvent(keyboardEventSource: source, virtualKey: press?.virtualKey ?? 0, keyDown: false) else { continue }
                 down.keyboardSetUnicodeString(stringLength: units.count, unicodeString: units)
                 up.keyboardSetUnicodeString(stringLength: units.count, unicodeString: units)
-                // No modifiers, explicitly: the character carries its own case, and an event made
-                // from this source after a ⌘Space (the Spotlight key) could otherwise inherit ⌘,
-                // which Spotlight's field ignores (typing into Spotlight did nothing, 2026-09-23).
-                down.flags = []
-                up.flags = []
+                // Shift only where the key needs it, as the Shift key itself pressed around the
+                // character (flags-changed, as KeyStrokes posts a modifier's own key): an app that
+                // reads keycodes (the iOS Simulator) takes its Shift from that key and ignores the
+                // flag, so `@` came out as `2`. No other modifier, explicitly: an event made from
+                // this source after a ⌘Space (the Spotlight key) could otherwise inherit ⌘, which
+                // Spotlight's field ignores (typing into Spotlight did nothing, 2026-09-23). Shift's
+                // up leaves the HID state table with no flags, for the next click (KeyStrokes' rule).
+                let shift = press?.shift == true
+                let flags: CGEventFlags = shift ? .maskShift : []
+                if shift { post([KeyStroke(virtualKey: Self.shiftKey, down: true, flags: KeyStrokes.shift)]) }
+                down.flags = flags
+                up.flags = flags
                 _ = post(down)
                 _ = post(up)
+                if shift { post([KeyStroke(virtualKey: Self.shiftKey, down: false, flags: 0)]) }
             }
             if !dryRun { Stats.shared.bump("in.text") }
         }
     }
+
+    private var layoutKeys = LayoutKeys()
+    /// kVK_Shift, the left Shift key.
+    private static let shiftKey: UInt16 = 56
 
     private func tap(virtualKey: CGKeyCode) {
         for down in [true, false] {
@@ -497,6 +679,7 @@ final class InputInjector {
         for stroke in strokes {
             guard let event = CGEvent(keyboardEventSource: source, virtualKey: stroke.virtualKey, keyDown: stroke.down) else { continue }
             event.flags = CGEventFlags(rawValue: stroke.flags)
+            if stroke.isRepeat { event.setIntegerValueField(.keyboardEventAutorepeat, value: 1) }
             // A dry run reads no table: what it would hold is the last event's flags, none of them the Mac's own.
             let table = stroke.down && !dryRun ? CGEventSource.flagsState(.hidSystemState).rawValue : lastKeyFlags
             let check = upCheck.posting(stroke, table: table, posted: lastKeyFlags)
@@ -519,6 +702,7 @@ final class InputInjector {
     /// The host is going: every key any device holds down goes up (KeyStrokes.releaseAll), then a
     /// button still down, where the pointer is, so nothing a device pressed outlives Sill on the Mac.
     func releaseAll() {
+        if magnifyOpen { magnifyOpen = false; postMagnify(.ended, at: magnifyAt, amount: 0) }
         post(keys.releaseAll(), letGo: true)
         if left.isDown { pointer(.leftUp, at: pointerNow()) }
         if right.isDown { pointer(.rightUp, at: pointerNow()) }
@@ -661,5 +845,31 @@ final class InputInjector {
         guard proc_name(parent, &buffer, UInt32(buffer.count)) > 0 else { return fallback }
         let name = String(cString: buffer)
         return name.isEmpty ? fallback : "\"\(name)\""
+    }
+}
+
+
+/// DIAGNOSTIC: how a plain pointer move (no button down) reaches macOS, chosen live with
+/// `defaults write me.saffer.sill.mac pointerPost hid|session|warp|warpAndHID` (read at most every
+/// half second; anything else is `hid`, the default). Drags, clicks and scrolls always post through
+/// the HID tap. It exists to compare `ptr.lag>…` in the `[1s]` lines between methods.
+enum PointerPost: String {
+    case hid, session, warp, warpAndHID
+
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var cached = PointerPost.hid
+    nonisolated(unsafe) private static var readAt = -Double.infinity
+
+    static var current: PointerPost {
+        let now = CACurrentMediaTime()
+        lock.lock(); defer { lock.unlock() }
+        guard now - readAt >= 0.5 else { return cached }
+        readAt = now
+        let wanted = UserDefaults.standard.string(forKey: "pointerPost").flatMap(PointerPost.init(rawValue:)) ?? .hid
+        if wanted != cached {
+            cached = wanted
+            print("Pointer posting: plain moves now go by \(wanted.rawValue).")
+        }
+        return cached
     }
 }

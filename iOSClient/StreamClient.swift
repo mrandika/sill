@@ -501,6 +501,7 @@ final class StreamClient: ObservableObject {
         }
         onParameterSets = { ps in view.apply(ps) }
         onFrame = { data, isKey in view.enqueue(data, isKeyframe: isKey) }
+        keyframeStuck = { [weak view] in view?.isStuckWaitingForKeyframe ?? false }
         return view
     }()
 
@@ -517,6 +518,9 @@ final class StreamClient: ObservableObject {
         }
     }
     var onFrame: ((_ data: Data, _ isKeyframe: Bool) -> Void)?
+    /// Whether the display view has waited over a second for a keyframe (the stats report it). Set with
+    /// the view; nil before there is one.
+    var keyframeStuck: (() -> Bool)?
 
     // Discovery (main thread). Two browsers: the network one always runs and never uses
     // peer-to-peer; the nearby one runs only when DiscoveryPolicy says, never while connected.
@@ -858,10 +862,22 @@ final class StreamClient: ObservableObject {
     /// six, nil from a Mac before 2026-09-27, which is sent none (`sendGesture`). Cleared with the
     /// session.
     @Published var hostGestures: Int?
+    /// Whether this session's Mac takes a two-finger pinch (`WindowList.magnify`, `InputEvent.magnify`);
+    /// nil from a Mac before it, which is sent none. Cleared with the session.
+    @Published var hostMagnify: Int?
     /// The clipboard (kind 32, StreamClient+Clipboard, docs/clipboard-plan.md): what this session's
     /// Mac takes and sends (`WindowList.clipboard`, 1 for text), nil from a Mac before it or with Share
     /// clipboard with devices off. Cleared with the session.
     @Published var hostClipboard: Int?
+    /// Whether this session's Mac accepts dropped files (`WindowList.fileDrop`, kinds 34 and 35).
+    @Published var hostFileDrop = false
+    /// What this session's Mac takes of the device's microphone (`WindowList.microphone`, 1 for
+    /// 48 kHz PCM16 / AAC-ELD).
+    @Published var hostMicrophone: Int?
+    var microphoneSender: AnyObject?
+    /// What this session's Mac takes of the device's camera (`WindowList.camera`, 1 for JPEG / HEVC).
+    @Published var hostCamera: Int?
+    var cameraSender: AnyObject?
     /// The chip "Paste on ‹Mac›" is offered (ClipboardPolicy.offersChip) until it is used, dismissed or
     /// its time is up; the stream screen hides it while something is open over the stream.
     @Published var clipboardChip = false
@@ -3485,6 +3501,15 @@ final class StreamClient: ObservableObject {
         hostVersion = nil
         hostProtocol = nil
         hostGestures = nil
+<<<<<<< Updated upstream
+=======
+        hostMagnify = nil
+>>>>>>> Stashed changes
+        hostFileDrop = false
+        stopMicrophoneCapture(sendStop: false)
+        hostMicrophone = nil
+        stopCameraCapture(sendStop: false)
+        hostCamera = nil
         remoteRoute = nil
         macInfo = nil
         macInfoSaved = false
@@ -3697,6 +3722,10 @@ final class StreamClient: ObservableObject {
     /// the Mac; the stream screen reads it with what streams (`active`): it acts only while a window
     /// does (`PhonePortraitLayout.largerPicture(switchOn:streaming:)`).
     static let largerPictureKey = "Sill.largerPicture"
+    /// This iPad's Immersive switch (docs/immersive-plan.md): off unless turned on. The device's own
+    /// preference, never sent to the Mac; the stream screen reads it with a hardware keyboard, the
+    /// iPad's turn and what streams (`ImmersivePolicy.applies`).
+    static let immersiveKey = "Sill.immersive"
 
     /// A three- or four-finger gesture a surface decided (TrackpadGestures, StrokeObserver), to the
     /// Mac as kind 28, which turns it into its own shortcut (docs/trackpad-gestures-plan.md §6.3):
@@ -3859,7 +3888,8 @@ final class StreamClient: ObservableObject {
         let sent: PointerFeedState.Sent
         switch event {
         case .pointer(_, let x, let y): sent = .pointer(CGPoint(x: x, y: y))
-        case .scroll(let x, let y, _, _), .scrollGesture(_, let x, let y): sent = .scroll(CGPoint(x: x, y: y))
+        case .scroll(let x, let y, _, _), .scrollGesture(_, let x, let y), .magnify(_, let x, let y, _):
+            sent = .scroll(CGPoint(x: x, y: y))
         case .text, .key: sent = .other
         }
         guard pointerFeed.sent(sent, now: CACurrentMediaTime()) else { return }
@@ -4034,6 +4064,19 @@ final class StreamClient: ObservableObject {
                 if self.hostVersion != list.hostVersion { self.hostVersion = list.hostVersion }
                 if self.hostProtocol != list.protocol { self.hostProtocol = list.protocol }
                 if self.hostGestures != list.gestures { self.hostGestures = list.gestures }
+<<<<<<< Updated upstream
+=======
+                if self.hostMagnify != list.magnify { self.hostMagnify = list.magnify }
+>>>>>>> Stashed changes
+                if self.hostFileDrop != (list.fileDrop == true) { self.hostFileDrop = (list.fileDrop == true) }
+                if self.hostMicrophone != list.microphone {
+                    self.hostMicrophone = list.microphone
+                    self.updateMicrophoneCapture()
+                }
+                if self.hostCamera != list.camera {
+                    self.hostCamera = list.camera
+                    self.updateCameraCapture()
+                }
                 // The clipboard: subscribe (or stop) as the Mac's word and this device's switch say.
                 self.hostClipboardChanged(list.clipboard)
                 if !self.sessionListed {

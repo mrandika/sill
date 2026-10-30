@@ -39,7 +39,8 @@ final class ClientStatsReporter: ObservableObject {
                                 frameAgeMaxMs: s.frameAge?.max ?? -1,
                                 rttMaxMs: s.rtt?.max ?? -1,
                                 audioBehindMs: s.soundBehindMs,
-                                audioLate: s.soundLate)
+                                audioLate: s.soundLate,
+                                keyframeWanted: (client.keyframeStuck?() ?? false) ? true : nil)
         client.send(.clientStats, payload: Wire.encode(stats))
     }
 

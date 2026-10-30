@@ -27,6 +27,9 @@ enum HostClock {
     }()
 
     static func now() -> Double { Double(mach_absolute_time()) * scale }
+
+    /// Mach ticks (an audio time stamp's host time) as seconds of the same clock.
+    static func seconds(ticks: UInt64) -> Double { Double(ticks) * scale }
 }
 
 /// The Mac's sound, from its source to the server (docs/audio-plan.md §4.5): the source, the
@@ -89,9 +92,20 @@ final class AudioPipeline: @unchecked Sendable {   // main-actor state, and stat
         let key: AudioKey
         let reason: String
         let make: @MainActor (AudioKey) async -> Made
+        /// Start the source afresh even when the same one ended a moment ago (a retry), or runs but is
+        /// captured another way now (Play sound on the device only).
+        let force: Bool
     }
     private var requested: Request?
     private var worker: Task<Void, Never>?
+    /// The `make` of the newest request, for the source's own retries (`scheduleRetry`).
+    private var lastMake: (@MainActor (AudioKey) async -> Made)?
+    private var retryTask: Task<Void, Never>?
+    private var retries = 0
+    /// A source that ended or failed is tried again by the pipeline itself after these (seconds), and
+    /// then only by the next `follow`: the display it was filtered on can go for a moment (a device's
+    /// own desktop taking over, another display mirroring), which the 10 s rule would have left silent.
+    private static let retryDelays: [Double] = [0.5, 1, 2, 4, 8, 15]
     /// AAC-ELD could not be made (`encoderProblem`): no sound this run, and every source shows why.
     private var encoderGone: String?
     /// "Audio stopped" was said for the source that runs.
@@ -133,8 +147,10 @@ final class AudioPipeline: @unchecked Sendable {   // main-actor state, and stat
     /// (`AudioSourceRule`); anything else stops what runs and starts the wanted one, with a new epoch.
     /// `make` builds the source when one is to start.
     @MainActor
-    func follow(_ key: AudioKey, reason: String = "", make: @escaping @MainActor (AudioKey) async -> Made) {
-        requested = Request(key: key, reason: reason, make: make)
+    func follow(_ key: AudioKey, reason: String = "", force: Bool = false, make: @escaping @MainActor (AudioKey) async -> Made) {
+        requested = Request(key: key, reason: reason, make: make, force: force)
+        lastMake = make
+        if key != current || key == .none { retries = 0; retryTask?.cancel(); retryTask = nil }
         wanted = key
         if key == .none { status = nil }
         if worker == nil { worker = Task { @MainActor in await self.run() } }
@@ -148,7 +164,7 @@ final class AudioPipeline: @unchecked Sendable {   // main-actor state, and stat
             stopSaid = true
             print("Audio stopped: Sill is quitting.")
         }
-        requested = Request(key: .none, reason: "Sill is quitting", make: { _ in .failed("quitting") })
+        requested = Request(key: .none, reason: "Sill is quitting", make: { _ in .failed("quitting") }, force: false)
         wanted = .none
         status = nil
         if worker == nil { worker = Task { @MainActor in await self.run() } }
@@ -158,8 +174,12 @@ final class AudioPipeline: @unchecked Sendable {   // main-actor state, and stat
     private func run() async {
         while let r = requested {
             requested = nil
-            switch AudioSourceRule.decide(current: current, phase: phase, lastStartAt: lastStartAt, wanted: r.key,
-                                          now: HostClock.now()) {
+            var decision = AudioSourceRule.decide(current: current, phase: phase, lastStartAt: lastStartAt, wanted: r.key,
+                                                  now: HostClock.now())
+            // The same source started again: it ended a moment ago (a retry), or it runs but is captured
+            // another way now (Play sound on the device only).
+            if r.force, r.key != .none, current == r.key, case .keep = decision { decision = .start }
+            switch decision {
             case .keep:
                 // The source there is stays (a stop asked for and taken back before it ran included).
                 if r.key != .none { status = sourceStatus }
@@ -229,6 +249,7 @@ final class AudioPipeline: @unchecked Sendable {   // main-actor state, and stat
         }
         guard g == generation else { return }   // it ended by itself meanwhile (`ended` has said so)
         phase = .running
+        retries = 0
         guard encoderGone == nil else { return }   // no sound this run: the status says why
         sourceStatus = Status(source: Self.shown(key), capturing: true, problem: nil)
     }
@@ -240,6 +261,7 @@ final class AudioPipeline: @unchecked Sendable {   // main-actor state, and stat
         phase = .ended
         print("Audio: could not capture \(Self.said(key)): \(why). The picture is unaffected.")
         sourceStatus = Status(source: Self.shown(key), capturing: false, problem: "couldn’t capture \(Self.soundOf(key)): \(why)")
+        scheduleRetry(key)
     }
 
     /// The source ended by itself (the permission revoked, the system stopping the stream).
@@ -250,11 +272,26 @@ final class AudioPipeline: @unchecked Sendable {   // main-actor state, and stat
         source = nil
         print("Audio capture ended: \(why). The picture is unaffected.")
         sourceStatus = Status(source: Self.shown(current), capturing: false, problem: "couldn’t capture \(Self.soundOf(current)): \(why)")
+        scheduleRetry(current)
         generation += 1
         let next = generation
         queue.async { self.live = next; self.packetizer = nil; self.encoder = nil }
     }
 
+
+    /// The source that ended or failed is wanted still: tried again soon, a few times with a growing wait.
+    @MainActor
+    private func scheduleRetry(_ key: AudioKey) {
+        retryTask?.cancel()
+        guard retries < Self.retryDelays.count, let make = lastMake, wanted == key, key != .none else { return }
+        let delay = Self.retryDelays[retries]
+        retries += 1
+        retryTask = Task { @MainActor in
+            try? await Task.sleep(for: .seconds(delay))
+            guard !Task.isCancelled, self.wanted == key, self.phase == .ended else { return }
+            self.follow(key, reason: "retrying", force: true, make: make)
+        }
+    }
 
     /// An error in one line: its own words for Sill's errors, else the system's with its domain and
     /// code (ScreenCaptureKit's −3801 for a missing permission, −3818 for sound that failed to start).

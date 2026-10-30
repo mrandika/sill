@@ -20,9 +20,16 @@ public struct Viewport: Codable, Hashable {
     /// The host runs the stream at the highest rate among its connected clients and restarts the
     /// pipeline when that changes.
     public var fps: Int?
+    /// The device shows the Desktop in full screen and wants it as a display of its own: the host
+    /// makes a virtual display of this viewport's size (÷ `scale`) the Mac's main display while the
+    /// Desktop streams, as Screen Sharing's High Performance mode does. nil or false (an older
+    /// client, or not in full screen) is the Mac's real screen. An older host ignores the key.
+    public var deviceDesktop: Bool?
 
-    public init(width: Double, height: Double, scale: Double?, localCursor: Bool? = nil, fps: Int? = nil) {
+    public init(width: Double, height: Double, scale: Double?, localCursor: Bool? = nil, fps: Int? = nil,
+                deviceDesktop: Bool? = nil) {
         self.width = width; self.height = height; self.scale = scale; self.localCursor = localCursor; self.fps = fps
+        self.deviceDesktop = deviceDesktop
     }
 }
 
@@ -50,12 +57,18 @@ public struct ClientStats: Codable, Hashable {
     public var audioBehindMs: Int?
     /// The sound's packets of that second that came too late to play. Nil as `audioBehindMs`.
     public var audioLate: Int?
+    /// True when the device's decoder has waited more than a second for a keyframe (its video layer
+    /// failed and flushed, say): the host then sends one at once, because its own periodic keyframe is
+    /// a minute apart. Nil from an older client, and when all is well.
+    public var keyframeWanted: Bool?
 
     public init(fps: Int, frameAgeMs: Int, rttMs: Int, device: String,
-                frameAgeMaxMs: Int? = nil, rttMaxMs: Int? = nil, audioBehindMs: Int? = nil, audioLate: Int? = nil) {
+                frameAgeMaxMs: Int? = nil, rttMaxMs: Int? = nil, audioBehindMs: Int? = nil, audioLate: Int? = nil,
+                keyframeWanted: Bool? = nil) {
         self.fps = fps; self.frameAgeMs = frameAgeMs; self.rttMs = rttMs; self.device = device
         self.frameAgeMaxMs = frameAgeMaxMs; self.rttMaxMs = rttMaxMs
         self.audioBehindMs = audioBehindMs; self.audioLate = audioLate
+        self.keyframeWanted = keyframeWanted
     }
 }
 

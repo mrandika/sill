@@ -253,6 +253,14 @@ check(Wire.decode(OldClientStats.self, from: Wire.encode(heard))
 let quiet = ClientStats(fps: 60, frameAgeMs: 9, rttMs: 7, device: "iPad")
 check(!json(quiet).contains("audio") && Wire.decode(ClientStats.self, from: Wire.encode(quiet))?.audioLate == nil,
       "a device that played no sound sends neither")
+// ClientStats' keyframeWanted: a stuck decoder asks, an older host skips it, a healthy one sends nothing.
+let asking = ClientStats(fps: 60, frameAgeMs: 9, rttMs: 7, device: "iPad", keyframeWanted: true)
+check(Wire.decode(ClientStats.self, from: Wire.encode(asking))?.keyframeWanted == true && json(asking).contains(#""keyframeWanted":true"#),
+      "ClientStats carries keyframeWanted")
+check(Wire.decode(OldClientStats.self, from: Wire.encode(asking))
+      == OldClientStats(fps: 60, frameAgeMs: 9, rttMs: 7, device: "iPad", frameAgeMaxMs: nil, rttMaxMs: nil),
+      "an older host reads the stats and skips keyframeWanted")
+check(!json(quiet).contains("keyframeWanted"), "a healthy decoder sends no keyframeWanted")
 // Kind 43.
 check(StreamMessageKind.audio.rawValue == 43 && StreamMessageKind(rawValue: 43) == .audio, "kind 43 is audio")
 check(StreamMessageKind(rawValue: 29) == nil && StreamMessageKind(rawValue: 42) == nil && StreamMessageKind(rawValue: 44) == .keyframeRequest,
@@ -275,6 +283,84 @@ check(Wire.decode(Clipboard.self, from: Data(#"{"text":"a","image":"AQID","later
 let clipboardMessage = StreamMessage(kind: .clipboard, timestamp: 1, isKeyframe: false, payload: Wire.encode(clip)).serialized()
 check(StreamMessage.parseHeader(clipboardMessage)?.kind == .clipboard && clipboardMessage.count == StreamMessage.headerLength + Wire.encode(clip).count,
       "the clipboard's header parses, then the JSON")
+
+// Kinds 34 and 35, file transfers (Item 8, pull request #66's FileChunk and FileDrop), and the
+// window list's `fileDrop`: additive both ways.
+check(StreamMessageKind.fileChunk.rawValue == 34 && StreamMessageKind(rawValue: 34) == .fileChunk, "kind 34 is fileChunk")
+check(StreamMessageKind.fileDrop.rawValue == 35 && StreamMessageKind(rawValue: 35) == .fileDrop, "kind 35 is fileDrop")
+check(FileChunk.maxBytes == 512 * 1024 && FileChunk.maxTotal == 512 * 1024 * 1024, "FileChunk caps: 512 KiB chunk, 512 MiB total")
+let packedChunk = FileChunk.pack(id: 7, name: "report.pdf", total: 10, offset: 4, bytes: Data([1, 2, 3, 4, 5, 6]))
+if let u = FileChunk.unpack(packedChunk) {
+    check(u.id == 7 && u.name == "report.pdf" && u.total == 10 && u.offset == 4 && u.bytes == Data([1, 2, 3, 4, 5, 6]),
+          "FileChunk round-trips")
+} else {
+    check(false, "FileChunk unpack failed")
+}
+check(FileChunk.unpack(Data([1, 2, 3])) == nil, "short FileChunk returns nil")
+check(FileChunk.safeName(" ../secret:a/b \n") == "file..-secret-a-b", "FileChunk.safeName strips slashes, colons and leading dots: \(FileChunk.safeName(" ../secret:a/b \n"))")
+check(FileChunk.safeName("   ") == "file", "FileChunk.safeName empty becomes file")
+let splitChunks = FileChunk.chunks(id: 9, name: "notes.txt", data: Data(repeating: 0x41, count: 10), maxChunkBytes: 4)
+check(splitChunks.count == 3, "10 bytes in 4-byte chunks -> 3 chunks")
+if splitChunks.count == 3, let c0 = FileChunk.unpack(splitChunks[0]), let c2 = FileChunk.unpack(splitChunks[2]) {
+    check(c0.offset == 0 && c0.bytes.count == 4 && c2.offset == 8 && c2.bytes.count == 2 && c2.total == 10, "chunk offsets and sizes")
+} else {
+    check(false, "splitChunks unpack")
+}
+let emptyChunks = FileChunk.chunks(id: 10, name: "empty.txt", data: Data(), maxChunkBytes: 4)
+check(emptyChunks.count == 1 && FileChunk.unpack(emptyChunks[0])?.total == 0, "0-byte file produces 1 empty chunk")
+let dropMsg = FileDrop(files: [7, 9], x: 0.25, y: 0.75)
+check(json(dropMsg) == #"{"files":[7,9],"x":0.25,"y":0.75}"#, "FileDrop JSON: \(json(dropMsg))")
+check(Wire.decode(FileDrop.self, from: Wire.encode(dropMsg)) == dropMsg, "FileDrop round-trips")
+var withFiles = shares
+withFiles.fileDrop = true
+check(json(withFiles).contains(#""fileDrop":true"#), "WindowList with fileDrop encodes fileDrop:true")
+check(!json(shares).contains("fileDrop"), "WindowList without fileDrop omits the key")
+check(Wire.decode(WindowList.self, from: Wire.encode(withFiles))?.fileDrop == true, "WindowList.fileDrop round-trips")
+// Kind 45, the device's microphone (Roadmap Item 9: MicrophoneMessage, MicrophoneFormat,
+// MicrophonePackets), and the window list's `microphone`: additive both ways.
+check(StreamMessageKind.microphone.rawValue == 45 && StreamMessageKind(rawValue: 45) == .microphone, "kind 45 is microphone")
+check(MicrophoneCodec.pcm16 == "pcm16" && MicrophoneCodec.aacELD == "aac-eld", "MicrophoneCodec names")
+check(MicrophoneCodec.choose(offered: ["aac-eld", "pcm16"]) == "aac-eld", "MicrophoneCodec.choose picks first supported")
+check(MicrophoneCodec.choose(offered: ["opus"]) == nil && MicrophoneCodec.choose(offered: nil) == nil, "MicrophoneCodec.choose returns nil when unsupported")
+let micFmt = MicrophoneFormat(codec: MicrophoneCodec.pcm16, sampleRate: 48_000, channels: 1, framesPerPacket: 480, epoch: 3)
+let fmtPayload = MicrophoneMessage.format(micFmt).serialized()
+check(fmtPayload.first == MicrophoneMessage.typeFormat && MicrophoneMessage.parse(fmtPayload) == .format(micFmt), "MicrophoneMessage.format round-trips")
+let stopFmt = MicrophoneFormat(stop: true)
+check(MicrophoneMessage.parse(MicrophoneMessage.format(stopFmt).serialized()) == .format(stopFmt), "MicrophoneMessage stop round-trips")
+let micPkts = MicrophonePackets(epoch: 3, seq: 42, segmentStart: true, packets: [Data([1, 2, 3, 4]), Data([5, 6])])
+let pktsPayload = MicrophoneMessage.packets(micPkts).serialized()
+check(pktsPayload.first == MicrophoneMessage.typePackets && MicrophoneMessage.parse(pktsPayload) == .packets(micPkts), "MicrophoneMessage.packets round-trips")
+check(MicrophoneMessage.parse(Data()) == nil && MicrophoneMessage.parse(Data([99, 1, 2])) == nil, "unknown or empty MicrophoneMessage returns nil")
+check(MicrophoneMessage.parse(Data([MicrophoneMessage.typePackets, 0, 1, 0, 0, 0, 1, 0, 0])) == nil, "0-packet MicrophonePackets rejected")
+check(MicrophoneMessage.parse(Data([MicrophoneMessage.typePackets, 0, 1, 0, 0, 0, 1, 0, 1, 0, 5, 1, 2])) == nil, "truncated MicrophonePackets rejected")
+check(MicrophoneMessage.parse(Data([MicrophoneMessage.typePackets, 0, 1, 0, 0, 0, 1, 0, 1, 0, 2, 1, 2, 99])) == nil, "trailing bytes in MicrophonePackets rejected")
+var withMic = shares
+withMic.microphone = 1
+check(json(withMic).contains(#""microphone":1"#), "WindowList with microphone encodes microphone:1")
+check(!json(shares).contains("microphone"), "WindowList without microphone omits the key")
+check(Wire.decode(WindowList.self, from: Wire.encode(withMic))?.microphone == 1, "WindowList.microphone round-trips")
+// Kind 46, the device's camera (Roadmap Item 10: CameraMessage, CameraFormat, CameraFrame), and the
+// window list's `camera`: additive both ways.
+check(StreamMessageKind.camera.rawValue == 46 && StreamMessageKind(rawValue: 46) == .camera, "kind 46 is camera")
+check(CameraCodec.jpeg == "jpeg" && CameraCodec.hevc == "hevc" && CameraCodec.generation == 1, "CameraCodec names and generation")
+check(CameraCodec.positionFront == "front" && CameraCodec.positionBack == "back", "CameraCodec positions")
+let camFmt = CameraFormat(codec: CameraCodec.jpeg, width: 1280, height: 720, fps: 30, position: CameraCodec.positionFront, epoch: 5)
+let camFmtPayload = CameraMessage.format(camFmt).serialized()
+check(camFmtPayload.first == CameraMessage.typeFormat && CameraMessage.parse(camFmtPayload) == .format(camFmt), "CameraMessage.format round-trips")
+let camStop = CameraFormat(stop: true)
+check(CameraMessage.parse(CameraMessage.format(camStop).serialized()) == .format(camStop), "CameraMessage stop round-trips")
+let camFrame = CameraFrame(epoch: 5, seq: 19, width: 1280, height: 720, keyframe: true, data: Data([0xFF, 0xD8, 0xFF, 0xD9]))
+let camFramePayload = CameraMessage.frame(camFrame).serialized()
+check(camFramePayload.first == CameraMessage.typeFrame && CameraMessage.parse(camFramePayload) == .frame(camFrame), "CameraMessage.frame round-trips")
+check(CameraMessage.parse(Data()) == nil && CameraMessage.parse(Data([99, 1, 2])) == nil, "unknown or empty CameraMessage returns nil")
+check(CameraMessage.parse(Data([CameraMessage.typeFrame, 0, 1, 0, 0, 0, 1, 0, 0, 2, 208, 1, 0xFF])) == nil, "zero-width CameraFrame rejected")
+check(CameraMessage.parse(Data([CameraMessage.typeFrame, 0, 1, 0, 0, 0, 1, 5, 0, 0, 0, 1, 0xFF])) == nil, "zero-height CameraFrame rejected")
+check(CameraMessage.parse(Data([CameraMessage.typeFrame, 0, 1, 0, 0, 0, 1, 5, 0, 2, 208, 1])) == nil, "empty-data CameraFrame rejected")
+var withCam = shares
+withCam.camera = 1
+check(json(withCam).contains(#""camera":1"#), "WindowList with camera encodes camera:1")
+check(!json(shares).contains("camera"), "WindowList without camera omits the key")
+check(Wire.decode(WindowList.self, from: Wire.encode(withCam))?.camera == 1, "WindowList.camera round-trips")
 
 // For H4: what cb0ec55's StreamProtocol must read.
 let out = CommandLine.arguments.count > 1 ? CommandLine.arguments[1] : nil

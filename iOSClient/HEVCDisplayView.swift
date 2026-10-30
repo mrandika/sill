@@ -12,8 +12,26 @@ final class HEVCDisplayView: UIView {
     private var displayLayer: AVSampleBufferDisplayLayer { layer as! AVSampleBufferDisplayLayer }
 
     private var formatDescription: CMVideoFormatDescription?
-    private var waitingForKeyframe = true
+    private var waitingForKeyframe = true {
+        didSet {
+            guard waitingForKeyframe != oldValue else { return }
+            waitLock.lock(); defer { waitLock.unlock() }
+            waitingSince = waitingForKeyframe ? CFAbsoluteTimeGetCurrent() : nil
+        }
+    }
     private var lastParameterSets: Data?
+    private let waitLock = NSLock()
+    private var waitingSince: CFAbsoluteTime?
+
+    /// The view has frames to show but has waited over a second for a keyframe to start on: the layer
+    /// failed and was flushed, or a keyframe was lost. The host's periodic keyframe is a minute apart, so the
+    /// client asks (`ClientStats.keyframeWanted`). Never before the first parameter sets, and never
+    /// after `clear()`. Any thread.
+    var isStuckWaitingForKeyframe: Bool {
+        waitLock.lock(); defer { waitLock.unlock() }
+        guard formatDescription != nil, let since = waitingSince else { return false }
+        return CFAbsoluteTimeGetCurrent() - since > 1.0
+    }
 
     /// The streamed frame's pixel size, reported on main whenever new parameter sets arrive.
     /// Input needs it: touches are normalized against the video, not against this view.

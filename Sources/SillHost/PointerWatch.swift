@@ -152,15 +152,34 @@ final class PointerWatch: @unchecked Sendable {   // every stored var is under `
             testPoint = p
             testPointAt = now
         }
+        if let p, !synthetic {
+            posted.append((p, now))
+            if posted.count > Self.postedKept { posted.removeFirst(posted.count - Self.postedKept) }
+        }
     }
+
+    /// The last pointer positions Sill posted, newest last, and when. `sample` finds the one the
+    /// Mac's pointer has reached and counts how late it was (`ptr.lag>60ms`, `>150ms`, `>300ms` in
+    /// the `[1s]` lines): the window server applies an event some time after the post returns, and a
+    /// pointer that trails the device by more than the settle is what hands it to the Mac. Under `lock`.
+    private var posted: [(point: CGPoint, at: Double)] = []
+    private static let postedKept = 128
+    /// How close a read must be to a posted position to count as having reached it, in points.
+    private static let reachedWithin: CGFloat = 1.5
 
     // MARK: From the network queue
 
     /// A kind 8 read from `client`, in the receive loop, in the same queue turn as its count.
     func inputArrived(from client: ObjectIdentifier, movesPointer: Bool) {
         lock.lock(); defer { lock.unlock() }
-        control.inputArrived(from: client, movesPointer: movesPointer, now: clock())
+        lastInputAt = clock()
+        control.inputArrived(from: client, movesPointer: movesPointer, now: lastInputAt)
     }
+
+    /// When the host last read a device's input, and when it last said the Mac took the pointer
+    /// (`sample`'s one line, at most every 2 s). Under `lock`.
+    private var lastInputAt = -Double.infinity
+    private var lastTookLine = -Double.infinity
 
     /// A device left; if it was driving, the Mac has the pointer again.
     func clientLeft(_ client: ObjectIdentifier) {
@@ -208,8 +227,23 @@ final class PointerWatch: @unchecked Sendable {   // every stored var is under `
         }
         guard let p = read else { lock.unlock(); return nil }
         let moved = lastRead.map { $0 != p } ?? true
+        let readBefore = lastRead
         lastRead = p
         let handedOver = control.read(p, now: now)
+        if !synthetic, let i = posted.lastIndex(where: { hypot($0.point.x - p.x, $0.point.y - p.y) <= Self.reachedWithin }) {
+            let late = now - posted[i].at
+            if late > 0.300 { Stats.shared.bump("ptr.lag>300ms") }
+            else if late > 0.150 { Stats.shared.bump("ptr.lag>150ms") }
+            else if late > 0.060 { Stats.shared.bump("ptr.lag>60ms") }
+            posted.removeFirst(i + 1)
+        }
+        var took: String?
+        if handedOver, !synthetic, now - lastTookLine >= 2 {
+            lastTookLine = now
+            let from = readBefore.map { "(\(Int($0.x)),\(Int($0.y)))" } ?? "?"
+            took = "Pointer: the Mac moved it from \(from) to (\(Int(p.x)),\(Int(p.y))), "
+                + "\(String(format: "%.2f", now - lastInputAt)) s after a device's last input."
+        }
         let watched = devices.contains { control.controller != .client($0) }
         var rect: CGRect
         var onScreen = true
@@ -231,6 +265,7 @@ final class PointerWatch: @unchecked Sendable {   // every stored var is under `
         lock.unlock()
         if let reread { dispatchReread(reread) }
         if handedOver { Stats.shared.bump("ptr.mac") }
+        if let took { print(took) }
         return reading
     }
 

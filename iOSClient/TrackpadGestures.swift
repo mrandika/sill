@@ -281,4 +281,17 @@ struct TrackpadGestures {
         guard switchOn, connected, let takes = hostGestures, takes >= generation else { return (false, false) }
         return (true, windowStreams)
     }
+
+    /// A trackpad's two-finger stroke made while Control is held, as the swipe it stands for (UIKit
+    /// gives an app no three-finger trackpad swipe, so Control + a two-finger stroke is the trackpad's
+    /// way to the same four swipes): once the stroke has moved `threshold` points along one axis, at
+    /// least `dominance` times as far as along the other. `translation` is the stroke so far, in the
+    /// direction the Mac would scroll (fingers moving left is negative x, as a swipe left); nil until
+    /// it is one.
+    static func controlSwipe(translation: CGPoint, threshold: CGFloat = 60, dominance: CGFloat = 1.5) -> Gesture? {
+        let dx = abs(translation.x), dy = abs(translation.y)
+        if dx >= threshold, dx >= dominance * dy { return translation.x < 0 ? .swipeLeft : .swipeRight }
+        if dy >= threshold, dy >= dominance * dx { return translation.y < 0 ? .swipeUp : .swipeDown }
+        return nil
+    }
 }

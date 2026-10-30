@@ -517,9 +517,9 @@ enum TourPolicy {
         let keyboardRow = row("keyboard", [strong("Keyboard"), plain(" types on \(mac), on screen or with a hardware keyboard.")])
         switch t {
         case .touch:
-            var rows = [row("hand.tap", [strong("Tap"), plain(" to click.")]),
-                        row("contextualmenu.and.cursorarrow", [strong("Touch and hold"), plain(" to right-click.")]),
-                        row("hand.draw", [strong("Drag"), plain(" to scroll.")])]
+            var rows = [row("hand.tap", [strong("Tap"), plain(" to click, "), strong("tap with two fingers"), plain(" to right-click.")]),
+                        row("contextualmenu.and.cursorarrow", [strong("Touch and hold"), plain(", then drag, to select or move.")]),
+                        row("hand.draw", [strong("Drag"), plain(" to scroll, "), strong("pinch"), plain(" to zoom.")])]
             if iPad { rows.append(row("applepencil", [strong("Apple Pencil"), plain(" works as a mouse.")])) }
             let hint: String
             switch layout {

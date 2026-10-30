@@ -1,12 +1,34 @@
 import Foundation
 import AppKit
+import IOKit.pwr_mgt
 import Network
+import QuartzCore
 import ScreenCaptureKit
 import StreamProtocol
 
 /// Owns the pipeline for the life of the process and points it at whatever source the client
 /// picks. Threading: this class is main-actor; frames flow capture queue → VT thread → network
 /// queue without touching it. Network callbacks hop here with Task { @MainActor }.
+/// The newest pointer move each connection has sent that the main actor has not handled yet
+/// (see `server.onMessage`). Network queue puts, main actor takes; under a lock.
+private final class MoveMailbox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var waiting: [ObjectIdentifier: (StreamMessage, NWConnection)] = [:]
+
+    /// True when it replaced a move nobody had taken.
+    func put(_ message: StreamMessage, _ connection: NWConnection, _ id: ObjectIdentifier) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        let replaced = waiting[id] != nil
+        waiting[id] = (message, connection)
+        return replaced
+    }
+
+    func take(_ id: ObjectIdentifier) -> (StreamMessage, NWConnection)? {
+        lock.lock(); defer { lock.unlock() }
+        return waiting.removeValue(forKey: id)
+    }
+}
+
 @MainActor
 package final class StreamCoordinator {
     /// The knobs (HostConfig.swift): the CLI's `standard` values and flag, or the app's Settings.
@@ -81,6 +103,9 @@ package final class StreamCoordinator {
     /// The virtual display needs that loop too: without it the setting is forced off.
     private let appKitLoop: Bool
     let stage: VirtualStage
+    /// The Desktop in full screen on a device: a virtual display at its size, main while it
+    /// streams (`Viewport.deviceDesktop`; DeviceDesktop.swift).
+    let deviceDesktop = DeviceDesktop()
     /// What the menu bar app shows. Written here, at the moment things happen; never read back.
     package let status: HostStatus
     /// Set by the signal handler: a select in flight when Ctrl-C lands must not stage anything new.
@@ -174,6 +199,10 @@ package final class StreamCoordinator {
     private var rectCache: (id: CGWindowID, rect: CGRect, at: CFAbsoluteTime)?
     private var pendingLaunch: String?
     private var switching = false
+    /// Display wake and display-sleep assertion while devices are connected (issue #134).
+    private var lastActivityDeclaredAt: Double?
+    private var displaySleepAssertion: IOPMAssertionID = 0
+    private var screenWakeObserver: NSObjectProtocol?
     /// A restart of the active source is in flight (a settings change, a resize, a rate change,
     /// the encoder fallback, a lost display): the source being restarted. Nil during a switch to
     /// another source.
@@ -293,6 +322,9 @@ package final class StreamCoordinator {
     /// subscribed, while Share clipboard with devices (`HostConfig.shareClipboard`) is on. Looks at
     /// nothing while nobody subscribes.
     let clipboard: HostClipboard
+    private lazy var fileDrops = FileDrops()
+    private lazy var microphone = HostMicrophone()
+    private lazy var camera = HostCamera()
     /// The Mac's sound (kind 43, AudioPipeline): the sound of what streams, to the devices that play
     /// it, while Send Audio is on. It follows the source from `active`'s didSet, as the pointer and
     /// the menus do, so the picture always starts first, and nothing of it waits on the picture or the
@@ -388,6 +420,13 @@ package final class StreamCoordinator {
         remote?.attach(server: server, status: status, macName: macName, requirePairing: config.requirePairing)
         catalog.preferMainDisplay = virtualDisplay   // the Desktop source must never capture the virtual display
         stage.onLost = { [weak self] in Task { @MainActor in await self?.stageLost() } }
+        deviceDesktop.onLost = { [weak self] in
+            Task { @MainActor in
+                guard let self, self.active == .desktop else { return }
+                print("Device desktop: the display went away; streaming the Desktop again.")
+                await self.select(.desktop)
+            }
+        }
         status.update { $0.synthetic = synthetic; $0.virtualDisplayOn = config.virtualDisplay }
         // Every change of the snapshot re-publishes the devices' settings state (deduplicated, so
         // the once-a-second stats send nothing). One before `server.start()` reaches nobody, and
@@ -414,6 +453,7 @@ package final class StreamCoordinator {
         server.onClientConnected = { [weak self] connection, route, link in
             Task { @MainActor in
                 guard let self else { return }
+                self.declareUserActivity(isConnect: true)
                 let id = ObjectIdentifier(connection)
                 self.routes[id] = route
                 // A paired device shows its paired name until its own stats arrive, and a remote one
@@ -465,6 +505,9 @@ package final class StreamCoordinator {
                 if self.flipWait == id { self.flipWait = nil }
                 self.menus.clientLeft(connection)
                 self.clipboard.clientLeft(connection)
+                self.fileDrops.clientLeft(connection)
+                self.microphone.clientLeft(connection)
+                self.camera.clientLeft(connection)
                 self.releaseKeys(of: id)
                 self.status.update { $0.devices.removeAll { $0.id == id } }
                 // The last device at home left devices away behind: the away quality, at once.
@@ -483,6 +526,7 @@ package final class StreamCoordinator {
                 guard let self else { return }
                 let wasEmpty = self.catalog.clientCount == 0
                 self.catalog.clientCount = count          // the catalog idles itself at 0
+                self.updateDisplaySleepAssertion(connectedDevices: count)
                 // Nobody is watching: stop capturing and encoding. The next client picks afresh.
                 if count == 0 { self.viewport = nil; self.clientFPS = [:] }   // the next device starts from scratch
                 if count == 0 { self.gestureChords.forget() }                 // and did not open a view it could close
@@ -506,8 +550,35 @@ package final class StreamCoordinator {
             self.server.broadcast(StreamMessage(kind: .appList, timestamp: Date().timeIntervalSince1970,
                                                 isKeyframe: false, payload: Wire.encode(apps)))
         }
+        // Input reaches the main actor through one Task per message. A pointer move is worth only its
+        // newest position, so moves wait in a mailbox, one per connection, and a newer one replaces an
+        // older that the main actor has not reached yet: after a stall it posts where the finger is
+        // now, not every point on the way. Anything else first takes the move waiting before it, so the
+        // order the device sent is the order the Mac sees. `in.hop>25ms` / `in.hop>100ms` count the
+        // time from the network queue's read to the main actor's turn, `in.moveSkipped` the moves
+        // replaced.
+        let moves = MoveMailbox()
         server.onMessage = { [weak self] message, connection in
-            Task { @MainActor in await self?.handle(message, from: connection) }
+            let arrived = CACurrentMediaTime()
+            guard message.kind == .input else {
+                Task { @MainActor in await self?.handle(message, from: connection) }
+                return
+            }
+            let id = ObjectIdentifier(connection)
+            if case .pointer(.move, _, _)? = Wire.decode(InputEvent.self, from: message.payload) {
+                if moves.put(message, connection, id) { Stats.shared.bump("in.moveSkipped") }
+                Task { @MainActor in
+                    guard let (waiting, from) = moves.take(id) else { return }
+                    Self.noteHop(since: arrived)
+                    await self?.handle(waiting, from: from)
+                }
+                return
+            }
+            Task { @MainActor in
+                if let (waiting, from) = moves.take(id) { await self?.handle(waiting, from: from) }
+                Self.noteHop(since: arrived)
+                await self?.handle(message, from: connection)
+            }
         }
         catalog.onWindowsChanged = { [weak self] infos in
             Task { @MainActor in await self?.windowsChanged(infos) }
@@ -653,6 +724,25 @@ package final class StreamCoordinator {
             if !hardwareResponds { enterSoftwareFallback(afterHang: false) }
         }
         if virtualDisplay { enableVirtualDisplay() }
+        if !synthetic && screenWakeObserver == nil {
+            screenWakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+                forName: NSWorkspace.screensDidWakeNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    try? await Task.sleep(for: .seconds(DisplayWakePolicy.wakeRestartDelay))
+                    guard let self else { return }
+                    guard DisplayWakePolicy.shouldRestartOnScreenWake(
+                        connectedDevices: self.catalog.clientCount,
+                        active: self.active != .none,
+                        shuttingDown: self.shuttingDown,
+                        synthetic: self.synthetic
+                    ) else { return }
+                    await self.select(self.active)
+                }
+            }
+        }
         catalog.start()
         // The only startup line Direct Wireless adds, and only when it is on: the default path
         // prints what it always printed.
@@ -729,6 +819,8 @@ package final class StreamCoordinator {
         // Share clipboard with devices, at once rather than between pipelines: off must stop what goes
         // out now, not after a restart. The lists say `clipboard` again (or no longer).
         if clipboard.setEnabled(new.shareClipboard) { broadcastList() }
+        // Mirror the other displays onto Immersive's desktop: at once too, a live display follows.
+        deviceDesktop.setMirroring(new.mirrorOtherDisplays)
         guard new != target else { return false }
         pendingConfig = new
         publishSettings()
@@ -842,6 +934,8 @@ package final class StreamCoordinator {
         // in the background, before the first chunk needs it.
         if !old.sendAudio, next.sendAudio { audio.prepare() }
         if old.sendAudio != next.sendAudio, !switching { audioFollow() }
+        // The same sound, captured the other way: its stream starts again; the picture never notices.
+        if old.deviceOnlySound != next.deviceOnlySound, next.sendAudio, !switching { audioFollow(force: true) }
     }
 
     /// Settings › Virtual Display › Try Again: clear a run-level disable, and stage the streamed
@@ -947,6 +1041,14 @@ package final class StreamCoordinator {
     }
 
     // MARK: Client messages
+
+    /// Input that waited for the main actor: over 25 ms and over 100 ms from the network queue's read
+    /// to its turn, in the `[1s]` lines.
+    nonisolated private static func noteHop(since arrived: CFTimeInterval) {
+        let waited = CACurrentMediaTime() - arrived
+        if waited > 0.100 { Stats.shared.bump("in.hop>100ms") }
+        else if waited > 0.025 { Stats.shared.bump("in.hop>25ms") }
+    }
 
     private func handle(_ message: StreamMessage, from connection: NWConnection) async {
         // Input decoded once, for the display's rule and for its case below.
@@ -1130,6 +1232,20 @@ package final class StreamCoordinator {
             // The clipboard (HostClipboard): a subscription, a device's text, or its stop. No `await`:
             // it reads and writes the pasteboard at once, and says nothing per copy.
             clipboard.received(message.payload, from: connection, who: deviceName(connection))
+        case .fileChunk:
+            guard !synthetic else { return }
+            fileDrops.chunk(message.payload, device: deviceName(connection), from: connection)
+        case .fileDrop:
+            guard !synthetic, let d = Wire.decode(FileDrop.self, from: message.payload) else { return }
+            let x = min(max(d.x, 0), 1), y = min(max(d.y, 0), 1)
+            let point = currentSourceRect().map { CGPoint(x: $0.minX + x * $0.width, y: $0.minY + y * $0.height) }
+            fileDrops.drop(d, at: point, device: deviceName(connection), from: connection)
+        case .microphone:
+            guard !synthetic else { return }
+            microphone.received(message.payload, from: connection, who: deviceName(connection))
+        case .camera:
+            guard !synthetic else { return }
+            camera.received(message.payload, from: connection, who: deviceName(connection))
         case .pressMenuItem:
             guard let r = Wire.decode(PressMenuItem.self, from: message.payload) else { return }
             // One of the Mac's menu items chosen from a device acts as a click on it would, and may
@@ -1176,6 +1292,7 @@ package final class StreamCoordinator {
             // The test pattern with the TEST ONLY scripted pointer: its own space, where a test
             // client's input moves that pointer (a synthetic host posts nothing).
             if synthetic, pointer.hasTestPointer { return Self.testPatternRect }
+            if deviceDesktop.isLive, let frame = deviceDesktop.frame { return frame }
             return catalog.display?.frame
         case .window(let id):
             // On the virtual display the video is the captured crop, not the whole window: an app
@@ -1219,6 +1336,7 @@ package final class StreamCoordinator {
             return nil
         case .desktop:
             if synthetic { return pointer.hasTestPointer ? .rect(Self.testPatternRect) : nil }
+            if deviceDesktop.isLive, let frame = deviceDesktop.frame { return .rect(frame) }
             return catalog.display.map { .rect($0.frame) }
         case .window(let id):
             guard !synthetic else { return nil }
@@ -1260,6 +1378,14 @@ package final class StreamCoordinator {
         // A different rate (a ProMotion device joined, Low Power Mode toggled) needs a new capture
         // interval and encoder session: one restart, whatever the source.
         if active != .none, effectiveFPS != fps { await select(active); return }
+        // The Desktop in full screen: a display of the device's size, made, resized or removed by a
+        // restart of the Desktop (the flag or the size changed: a toggle, a rotation, an Aa step).
+        if active == .desktop, !synthetic {
+            let want = wantedDeviceDesktop
+            let unchanged = want.map { deviceDesktop.matches(size: $0, refreshHz: fps) } ?? !deviceDesktop.isLive
+            if !unchanged { await select(.desktop) }
+            return
+        }
         if virtualDisplay, stage.isStaged, case .window(let id) = active {
             // One restart: prepare re-places the window on the same display (the display is only
             // recreated if the envelope grew). The client's identical re-send after a switch is a
@@ -1276,6 +1402,13 @@ package final class StreamCoordinator {
         }
         guard case .window(let id) = active, let w = catalog.window(id: id) else { return }
         if fitToViewport(w) != nil { await catalog.refreshWindows() }
+    }
+
+    /// The device desktop's size for the last viewport, or nil for the Mac's real screen: the
+    /// device did not ask, or the display cannot be made here (no AppKit loop, a synthetic host).
+    private var wantedDeviceDesktop: CGSize? {
+        guard appKitLoop, !synthetic, let v = viewport, v.deviceDesktop == true else { return nil }
+        return DeviceDesktop.wantedSize(for: v)
     }
 
     /// `--virtual-display`: how big the window should be on the virtual display and how big the
@@ -1436,6 +1569,8 @@ package final class StreamCoordinator {
                 stage.release()
             }
         }
+        // The device desktop lives only while the Desktop streams to a device that asked for it.
+        if source != .desktop || wantedDeviceDesktop == nil { deviceDesktop.release() }
         // In regular mode, every window Sill sized but the one about to stream goes back to its own
         // frame (WindowRestore, issue #57): another window or the Desktop picked, `.none` when the
         // last device leaves or the stream stops. A restart of the same window keeps it fitted.
@@ -1538,7 +1673,19 @@ package final class StreamCoordinator {
                 describe = "a synthetic test pattern\(useSoftwareEncoder ? " (software encoder)" : "")"
                 title = "Test Pattern"; kind = .testPattern
             } else {
-                guard let d = catalog.display else { active = .none; broadcastList(); return }
+                var shown = catalog.display
+                var deviceSize: CGSize? = nil
+                if let want = wantedDeviceDesktop {
+                    do {
+                        shown = try await deviceDesktop.ensure(size: want, refreshHz: fps)
+                        deviceSize = want
+                    } catch {
+                        print("Device desktop unavailable (\(error)); streaming the Mac's screen instead.")
+                        deviceDesktop.release()
+                    }
+                    guard !shuttingDown else { deviceDesktop.release(); active = .none; broadcastList(); return }
+                }
+                guard let d = shown else { active = .none; broadcastList(); return }
                 // Sill's own windows (Settings, Log, the pairing window with its code) never go out
                 // in a Desktop stream. Fixed here at pipeline start: a running SCStream is never
                 // reconfigured, so a host that can show a pairing code (remote access) looks for
@@ -1558,7 +1705,8 @@ package final class StreamCoordinator {
                 displayScale = Self.displayScale(of: displayFilter)
                 let pixelScale = CaptureScale.effective(knob: captureScale, displayScale: displayScale)
                 width = evenPixels(CGFloat(d.width) * pixelScale); height = evenPixels(CGFloat(d.height) * pixelScale)
-                describe = "the whole desktop\(useSoftwareEncoder ? " (software encoder)" : "")"
+                describe = (deviceSize.map { "the device's own desktop, \(Int($0.width))×\(Int($0.height)) pt" } ?? "the whole desktop")
+                    + (useSoftwareEncoder ? " (software encoder)" : "")
                 title = "Whole Desktop"; kind = .desktop
             }
         }
@@ -1730,6 +1878,7 @@ package final class StreamCoordinator {
         case .pointer(let action, _, _): guard action == .leftDown || action == .rightDown else { return }; needsFocus = true
         case .scroll: needsFocus = false
         case .scrollGesture(let phase, _, _): guard phase == .began else { return }; needsFocus = false
+        case .magnify(let phase, _, _, _): guard phase == .began else { return }; needsFocus = false
         case .key(_, let down, _): guard down else { return }; needsFocus = true
         case .text: needsFocus = true
         }
@@ -1843,7 +1992,8 @@ package final class StreamCoordinator {
     private func injectorProbePoint(_ event: InputEvent) -> CGPoint? {
         guard let rect = currentSourceRect() else { return nil }
         switch event {
-        case .pointer(_, let x, let y), .scroll(let x, let y, _, _), .scrollGesture(_, let x, let y):
+        case .pointer(_, let x, let y), .scroll(let x, let y, _, _), .scrollGesture(_, let x, let y),
+             .magnify(_, let x, let y, _):
             return InputLanding.point(x: x, y: y, in: rect, displayScale: streamDisplayScale)
         default: return nil
         }
@@ -2115,9 +2265,9 @@ package final class StreamCoordinator {
     }
 
     /// Hands the pipeline what the sound should be of now.
-    private func audioFollow() {
+    private func audioFollow(force: Bool = false) {
         let (key, reason) = audioKey()
-        audio.follow(key, reason: reason) { [weak self] key in
+        audio.follow(key, reason: reason, force: force) { [weak self] key in
             await self?.makeAudioSource(key) ?? .failed("the host is shutting down")
         }
     }
@@ -2132,7 +2282,15 @@ package final class StreamCoordinator {
         case .test:
             return .source(SyntheticAudio(queue: audio.queue), line: "Audio: a test tone (440 Hz at -30 dBFS, a click at each second).")
         case .desktop:
-            guard let display = catalog.display else { return .failed("no display to capture from") }
+            // A Core Audio tap (Play sound on the device only) needs no display at all.
+            if let tap = deviceOnlyTap(.everyApp) {
+                return .source(tap, line: "Audio: tapping the whole Mac's sound (every app but Sill); the Mac is silent while a device plays it.")
+            }
+            // The device's own desktop, once it is the main display (Immersive), is the display that is
+            // there: the Mac's real one can drop out of ScreenCaptureKit's list (another display taking
+            // over, or mirroring it), and a sound filtered on it ends. Sound does not depend on the display.
+            let live = deviceDesktop.isLive ? deviceDesktop.scDisplay : nil
+            guard let display = live ?? catalog.display else { return .failed("no display to capture from") }
             let filter: SCContentFilter
             if let own = catalog.ownApplication {
                 filter = SCContentFilter(display: display, excludingApplications: [own], exceptingWindows: [])
@@ -2141,11 +2299,25 @@ package final class StreamCoordinator {
             }
             return .source(AudioCapture(filter: filter, queue: audio.queue), line: "Audio: capturing the whole Mac's sound (every app but Sill).")
         case .app(let pid, let name):
-            guard let display = catalog.display else { return .failed("no display to capture from") }
+            if let tap = deviceOnlyTap(.app(pid: pid, name: name)) {
+                return .source(tap, line: "Audio: tapping \(name)'s sound (every window of it); the Mac is silent for it while a device plays it.")
+            }
+            guard let display = (deviceDesktop.isLive ? deviceDesktop.scDisplay : nil) ?? catalog.display else { return .failed("no display to capture from") }
             guard let app = await runningApplication(pid) else { return .failed("\(name) is not among the apps ScreenCaptureKit lists") }
             let filter = SCContentFilter(display: display, including: [app], exceptingWindows: [])
             return .source(AudioCapture(filter: filter, queue: audio.queue), line: "Audio: capturing \(name)'s sound (every window of it).")
         }
+    }
+
+    /// The Core Audio tap for Play sound on the device only (macOS 14.2 and later), or nil: the setting
+    /// is off, or this Mac is older (one line, and ScreenCaptureKit's copy is used, the Mac playing too).
+    private func deviceOnlyTap(_ scope: AudioTapScope) -> AudioSource? {
+        guard config.deviceOnlySound else { return nil }
+        if #available(macOS 14.2, *) {
+            return AudioTapCapture(scope: scope, queue: audio.queue)
+        }
+        print("Audio: Play sound on the device only needs macOS 14.2 or later; the Mac plays its sound too.")
+        return nil
     }
 
     /// The app with this pid as ScreenCaptureKit lists it: from the catalog's last look, else from one
@@ -2193,9 +2365,44 @@ package final class StreamCoordinator {
         injector.releaseAll()
         server.goodbyeAll(Goodbye(reason: Goodbye.quit), within: 0.1)
         shuttingDown = true
+        updateDisplaySleepAssertion(connectedDevices: 0)
         audio.shutdown()   // "Audio stopped: Sill is quitting."
         restoreFits(keeping: nil)
         stage.release()
+        deviceDesktop.release()
+    }
+
+    private func declareUserActivity(isConnect: Bool) {
+        let now = CFAbsoluteTimeGetCurrent()
+        guard DisplayWakePolicy.shouldDeclareActivity(
+            isConnect: isConnect,
+            lastDeclaredAt: lastActivityDeclaredAt,
+            now: now,
+            synthetic: synthetic
+        ) else { return }
+        lastActivityDeclaredAt = now
+        var id: IOPMAssertionID = 0
+        _ = IOPMAssertionDeclareUserActivity("Sill: device activity" as CFString, kIOPMUserActiveLocal, &id)
+    }
+
+    private func updateDisplaySleepAssertion(connectedDevices: Int) {
+        let shouldHold = DisplayWakePolicy.holdsSleepAssertion(connectedDevices: connectedDevices, synthetic: synthetic)
+        if shouldHold {
+            if displaySleepAssertion == 0 {
+                var id: IOPMAssertionID = 0
+                if IOPMAssertionCreateWithName(
+                    kIOPMAssertionTypePreventUserIdleDisplaySleep as CFString,
+                    IOPMAssertionLevel(kIOPMAssertionLevelOn),
+                    "Sill: a device is connected" as CFString,
+                    &id
+                ) == kIOReturnSuccess {
+                    displaySleepAssertion = id
+                }
+            }
+        } else if displaySleepAssertion != 0 {
+            IOPMAssertionRelease(displaySleepAssertion)
+            displaySleepAssertion = 0
+        }
     }
 
     /// The CLI's default path at a signal (HostShutdown.installKeyRelease), just before it dies of it:
@@ -2605,7 +2812,7 @@ package final class StreamCoordinator {
             case .leftDown, .rightDown: return .buttonDown
             case .leftUp, .rightUp: return .buttonUp
             }
-        case .scroll, .scrollGesture: return .scroll
+        case .scroll, .scrollGesture, .magnify: return .scroll
         case .key(_, let down, _): return down ? .keyDown : .keyUp
         case .text: return .text
         }
@@ -2639,10 +2846,18 @@ package final class StreamCoordinator {
     // MARK: Catalog to clients
 
     private func listMessage() -> StreamMessage {
-        StreamMessage(kind: .windowList, timestamp: Date().timeIntervalSince1970, isKeyframe: false,
-                      payload: Wire.encode(WindowList(macName: macName, windows: catalog.infos, active: active, launchID: launchID,
-                                                      hostVersion: hostVersion, protocol: SillProtocol.current,
-                                                      gestures: TrackpadGesture.generation, clipboard: clipboard.advertised)))
+        var list = WindowList(macName: macName, windows: catalog.infos, active: active, launchID: launchID,
+                              hostVersion: hostVersion, protocol: SillProtocol.current,
+                              gestures: TrackpadGesture.generation, clipboard: clipboard.advertised)
+<<<<<<< Updated upstream
+=======
+        list.magnify = Magnify.generation
+>>>>>>> Stashed changes
+        list.fileDrop = synthetic ? nil : true
+        list.microphone = synthetic ? nil : MicrophoneCodec.generation
+        list.camera = synthetic ? nil : CameraCodec.generation
+        return StreamMessage(kind: .windowList, timestamp: Date().timeIntervalSince1970, isKeyframe: false,
+                             payload: Wire.encode(list))
     }
 
     private func broadcastList() { server.broadcast(listMessage()) }

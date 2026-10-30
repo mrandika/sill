@@ -56,6 +56,16 @@ package struct HostConfig: Equatable, Sendable {
     /// HostSettingsChange, DeviceSettings.accepted, `applying` and `restartNeeded`, so no device turns
     /// it on. Applied at once (`StreamCoordinator.setTarget`), not between pipelines.
     package var shareClipboard: Bool
+    /// Mirror the Mac's other displays onto Immersive's "Sill Desktop" while it lives, so nothing
+    /// opens on a display the device does not show (DeviceDesktop). The Mac's alone, off by default,
+    /// applied at once (`StreamCoordinator.setTarget`); absent from the wire and from `init`.
+    package var mirrorOtherDisplays = false
+    /// Play sound on the device only: with Send Audio on, the sound comes from a Core Audio process tap
+    /// that silences what it taps on this Mac while a device plays it (AudioTapCapture; macOS 14.2 and
+    /// later, and its own permission, System Audio Recording). Off by default: ScreenCaptureKit copies
+    /// the sound and the Mac keeps playing it. The sound's own stream's, not the pipeline's: a change
+    /// starts that stream again and never restarts the picture. The Mac's alone, and absent from the wire.
+    package var deviceOnlySound = false
     /// Send Audio: every connected device that plays the Mac's sound (its hello lists a codec) gets the
     /// sound of what streams, the streamed window's app or every app for the Desktop (AudioPipeline,
     /// kind 43). Off in `standard` (the CLI's `--audio` opts in), on in Sill.app since 2026-10-27 (`app`):
@@ -159,6 +169,8 @@ package struct HostConfig: Equatable, Sendable {
         if internetAccess != new.internetAccess { parts.append("internet access \(onOff(internetAccess)) → \(onOff(new.internetAccess))") }
         if requirePairing != new.requirePairing { parts.append("require pairing \(onOff(requirePairing)) → \(onOff(new.requirePairing))") }
         if shareClipboard != new.shareClipboard { parts.append("share clipboard \(onOff(shareClipboard)) → \(onOff(new.shareClipboard))") }
+        if deviceOnlySound != new.deviceOnlySound { parts.append("device-only sound \(onOff(deviceOnlySound)) → \(onOff(new.deviceOnlySound))") }
+        if mirrorOtherDisplays != new.mirrorOtherDisplays { parts.append("mirror other displays \(onOff(mirrorOtherDisplays)) → \(onOff(new.mirrorOtherDisplays))") }
         if sendAudio != new.sendAudio { parts.append("send audio \(onOff(sendAudio)) → \(onOff(new.sendAudio))") }
         return parts.isEmpty ? "no change" : parts.joined(separator: ", ")
     }

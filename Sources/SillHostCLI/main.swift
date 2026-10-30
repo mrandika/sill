@@ -48,6 +48,9 @@ config.shareClipboard = !CommandLine.arguments.contains("--no-clipboard")
 // that lasts until SillHost quits. Without it the output is what it always was.
 let audioFlag = CommandLine.arguments.contains("--audio")
 config.sendAudio = audioFlag
+// `--audio-device-only`: with --audio, the sound comes from a Core Audio process tap that silences it on
+// this Mac while a device plays it (macOS 14.2 and later; System Audio Recording).
+config.deviceOnlySound = CommandLine.arguments.contains("--audio-device-only")
 
 // `SillHost --remote[=PORT]`: the remote door for this run (TLS 1.3, paired devices only), on
 // PORT or any free port, so it never collides with Sill.app's 7455. A new in-memory identity and

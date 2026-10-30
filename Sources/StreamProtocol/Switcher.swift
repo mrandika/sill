@@ -53,6 +53,9 @@ public struct WindowList: Codable {
     /// 2026-09-27, to which a device sends no kind 28. A later generation of gestures says 2 and
     /// goes only to a host that says so.
     public var gestures: Int?
+    /// Whether this host takes a two-finger pinch as `InputEvent.magnify` (`Magnify.generation`, 1).
+    /// Nil from every host before it: a device sends it none, and zooms nothing on that Mac.
+    public var magnify: Int?
     /// What this host takes and sends of the clipboard (kind 32, Clipboard.swift): 1 is text
     /// (`ClipboardPolicy.generation`). Nil from every host before 2026-10-14, and from one whose Share
     /// clipboard with devices is off: a device sends no kind 32 to either. A later generation
@@ -60,6 +63,15 @@ public struct WindowList: Codable {
     /// pull request #66's `Bool` (never released) does not decode here and becomes an Int as it
     /// rebases.
     public var clipboard: Int?
+    /// True: this host takes files dropped on its windows (kinds 34 and 35, FileChunk and FileDrop).
+    /// Nil from hosts before file drops, and from synthetic test hosts.
+    public var fileDrop: Bool?
+    /// What this host takes of the device's microphone (kind 45, MicrophoneMessage): 1 is 48 kHz
+    /// mono PCM16 / AAC-ELD. Nil from hosts before microphone support or synthetic test hosts.
+    public var microphone: Int?
+    /// What this host takes of the device's camera (kind 46, CameraMessage): 1 is JPEG / HEVC frames.
+    /// Nil from hosts before camera support or synthetic test hosts.
+    public var camera: Int?
 
     public init(macName: String, windows: [WindowInfo], active: StreamSource, launchID: String? = nil,
                 hostVersion: String? = nil, protocol: Int? = nil, gestures: Int? = nil, clipboard: Int? = nil) {

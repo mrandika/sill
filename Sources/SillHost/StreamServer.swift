@@ -68,6 +68,8 @@ final class StreamServer {
         var worstRttSincePrint = -1
         /// The sound's packets too late to play (ClientStats.audioLate) reported since that line.
         var audioLateSincePrint = 0
+        /// When this device last asked for a keyframe through its stats (`ClientStats.keyframeWanted`).
+        var lastKeyframeAsk = 0.0
         /// Which door and from where: `.home(origin, peer:)` decided at `.ready`, or the remote door's.
         var route = ClientRoute.home(.loopback, peer: nil)
         /// The device's own name from its last ClientStats, cleaned (SafeText), for its stats line
@@ -1427,6 +1429,13 @@ final class StreamServer {
                         client.worstRttSincePrint = max(client.worstRttSincePrint, stats.rttMaxMs ?? -1)
                         client.audioLateSincePrint += max(0, stats.audioLate ?? 0)
                         let now = CFAbsoluteTimeGetCurrent()
+                        // The periodic keyframe is a minute apart: a device whose decoder is stuck says so,
+                        // and gets one at once (at most one every 2 s, one line each).
+                        if stats.keyframeWanted == true, now - client.lastKeyframeAsk >= 2 {
+                            client.lastKeyframeAsk = now
+                            print("Keyframe: \(client.device ?? "a device") is waiting for one; sending it.")
+                            self.onKeyframeNeeded?()
+                        }
                         if now - client.lastStatsPrint >= 1.5 {
                             client.lastStatsPrint = now
                             let age = Self.medianAndWorst(stats.frameAgeMs, worst: stats.frameAgeMaxMs.map { _ in client.worstFrameAgeSincePrint })

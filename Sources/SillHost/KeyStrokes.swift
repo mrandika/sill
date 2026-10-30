@@ -43,9 +43,12 @@ package struct KeyStroke: Equatable, Sendable {
     package var virtualKey: UInt16
     package var down: Bool
     package var flags: UInt64
+    /// A down of a key already down: a device holding it (the device repeats a held key, as the Mac
+    /// does not for events posted from here). Posted with the autorepeat field set, as a keyboard's.
+    package var isRepeat: Bool
 
-    package init(virtualKey: UInt16, down: Bool, flags: UInt64) {
-        self.virtualKey = virtualKey; self.down = down; self.flags = flags
+    package init(virtualKey: UInt16, down: Bool, flags: UInt64, isRepeat: Bool = false) {
+        self.virtualKey = virtualKey; self.down = down; self.flags = flags; self.isRepeat = isRepeat
     }
 }
 
@@ -75,6 +78,7 @@ package struct KeyStrokes: Sendable {
         let said = Self.flags(fromDevice: modifiers)
         var strokes = letGo(of: device, keeping: said, except: usage)
         let flags: UInt64
+        let repeated = isDown && self.down[usage] == device && Self.modifierKeys[usage] == nil
         if Self.modifierKeys[usage] != nil {
             down[usage] = isDown ? device : nil
             flags = heldFlags
@@ -85,7 +89,7 @@ package struct KeyStrokes: Sendable {
             down[usage] = nil
             flags = heldFlags
         }
-        strokes.append(KeyStroke(virtualKey: virtualKey, down: isDown, flags: flags))
+        strokes.append(KeyStroke(virtualKey: virtualKey, down: isDown, flags: flags, isRepeat: repeated))
         return strokes
     }
 

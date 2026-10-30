@@ -162,10 +162,12 @@ final class HEVCEncoder {
         set(kVTCompressionPropertyKey_RealTime, kCFBooleanTrue)
         set(kVTCompressionPropertyKey_ProfileLevel, kVTProfileLevel_HEVC_Main_AutoLevel)
         set(kVTCompressionPropertyKey_AllowFrameReordering, kCFBooleanFalse)      // no B-frames
-        // Keyframes are requested on demand (new client, dropped delta, source switch); this is
-        // only a safety interval. Longer intervals cut the periodic IDR hitch; 4 s is the value
-        // every working stream so far has used.
-        set(kVTCompressionPropertyKey_MaxKeyFrameInterval, (fps * 4) as CFNumber)
+        // Keyframes are requested on demand (new client, dropped delta, source switch, a device whose
+        // decoder is stuck: `ClientStats.keyframeWanted`); this is only a safety interval. A periodic
+        // IDR is 1-2 MB at Pro and above: it stalled the picture for 50 ms every 4 s and, behind it,
+        // the sound, whose jitter cover had to be as large (measured 2026-10-25 on the iPad Pro: the
+        // sound 87-110 ms behind the picture at 4 s, 67 ms at 60 s, frame age 11 ms against 5 ms).
+        set(kVTCompressionPropertyKey_MaxKeyFrameInterval, (fps * 60) as CFNumber)
         set(kVTCompressionPropertyKey_ExpectedFrameRate, fps as CFNumber)
         set(kVTCompressionPropertyKey_AverageBitRate, bitrate as CFNumber)
         set(kVTCompressionPropertyKey_DataRateLimits, [bitrate / 8, 1] as CFArray)

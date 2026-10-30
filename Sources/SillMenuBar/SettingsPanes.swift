@@ -141,6 +141,12 @@ private struct GeneralPane: View {
             } footer: {
                 Footnote("Lets your iPhone and iPad connect when they’re near this Mac, even without a shared Wi\u{2011}Fi network, the way AirDrop does. While it’s on, this Mac’s Wi\u{2011}Fi keeps stepping away from your network, so streaming over Wi\u{2011}Fi can stutter. Anyone nearby with Sill can find this Mac; only devices you paired can connect, unless Require pairing is off.")
             }
+            // Immersive's desktop (DeviceDesktop): mirrors the Mac's other displays while it runs.
+            Section {
+                Toggle("Mirror other displays during Immersive", isOn: $settings.config.mirrorOtherDisplays)
+            } footer: {
+                Footnote("While an iPad or iPhone shows its own desktop in Immersive, this Mac’s other displays mirror it, so no app or window opens on a display the device does not show. They go back to normal when Immersive ends. Takes over those displays meanwhile.")
+            }
             // The clipboard both ways (HostClipboard): at once, no restart. Each device has its own
             // switch too. macOS's answer is read with the permissions (once a second while this pane
             // shows, and when Sill becomes active), never in a preview.
@@ -313,11 +319,14 @@ private struct StreamingPane: View {
             // (Q8 as Noah revised it on 2026-10-27).
             Section {
                 Toggle("Send audio (beta)", isOn: $settings.config.sendAudio)
+                if settings.config.sendAudio, #available(macOS 14.2, *) {
+                    Toggle("Play sound on the device only", isOn: $settings.config.deviceOnlySound)
+                }
                 if settings.config.sendAudio, let problem = model.coordinator?.status.snapshot.audio?.problem {
                     Warning("Sill \(problem). The picture is unaffected.")
                 }
             } footer: {
-                Footnote("Beta. Devices play the sound of what you stream: all of the streamed window’s app, or every app for the Desktop. The Mac keeps playing it too. A connected iPhone or iPad can also turn this on or off from Sill’s settings there, and mute it for itself alone. Nothing is recorded.")
+                Footnote("Beta. Devices play the sound of what you stream: all of the streamed window’s app, or every app for the Desktop. The Mac keeps playing it too, unless “Play sound on the device only” is on: then the Mac is silent for what it sends while a device plays it (macOS asks for System Audio Recording the first time; a device can still mute it for itself). A connected iPhone or iPad can also turn this on or off from Sill’s settings there. Nothing is recorded.")
             }
             if let snapshot = model.coordinator?.status.snapshot, snapshot.softwareEncoder {
                 Section {

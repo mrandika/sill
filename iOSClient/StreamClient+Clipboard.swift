@@ -1,4 +1,6 @@
 import Foundation
+import AVFoundation
+import CoreImage
 import UIKit
 import UniformTypeIdentifiers
 import StreamProtocol
@@ -334,5 +336,328 @@ extension StreamClient {
         let work = DispatchWorkItem { [weak self] in self?.clipboardNote = nil }
         clipboardNoteExpiry = work
         DispatchQueue.main.asyncAfter(deadline: .now() + ClipboardPolicy.noteLifetime, execute: work)
+    }
+
+    // MARK: Files on the Mac (kinds 34 and 35, Roadmap Item 8 / pull request #66)
+
+    /// Sends `files` in 512 KiB chunks (kind 34 `fileChunk`) followed by `FileDrop` (kind 35 `fileDrop`)
+    /// at normalized coordinates `location` (`0...1`).
+    @discardableResult
+    func sendFiles(_ files: [(name: String, data: Data)], at location: CGPoint = CGPoint(x: 0.5, y: 0.5)) -> Bool {
+        guard connected, hostFileDrop, !files.isEmpty else { return false }
+        let mac = macName.isEmpty ? "the Mac" : macName
+        let totalBytes = files.reduce(UInt64(0)) { $0 + UInt64($1.data.count) }
+        guard totalBytes <= FileChunk.maxTotal else {
+            let msg = "Too large to send to \(mac) (over 512 MB)."
+            showClipboardNote(msg, spoken: msg, warning: true)
+            return false
+        }
+        let x = Double(min(max(location.x, 0), 1))
+        let y = Double(min(max(location.y, 0), 1))
+        var ids: [UInt32] = []
+        for file in files {
+            let id = UInt32.random(in: 1...UInt32.max)
+            ids.append(id)
+            for chunkPayload in FileChunk.chunks(id: id, name: file.name, data: file.data) {
+                send(.fileChunk, payload: chunkPayload)
+            }
+        }
+        let drop = FileDrop(files: ids, x: x, y: y)
+        send(.fileDrop, payload: Wire.encode(drop))
+        let names = files.map(\.name).joined(separator: ", ")
+        let msg = "Sent \(names) to \(mac)."
+        showClipboardNote(msg, spoken: msg, warning: false)
+        return true
+    }
+
+    /// Reads security-scoped file URLs from `.fileImporter` and sends them to the Mac.
+    func sendFileURLs(_ urls: [URL], at location: CGPoint = CGPoint(x: 0.5, y: 0.5)) {
+        guard connected, hostFileDrop, !urls.isEmpty else { return }
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            var loaded: [(name: String, data: Data)] = []
+            for url in urls {
+                let accessed = url.startAccessingSecurityScopedResource()
+                defer { if accessed { url.stopAccessingSecurityScopedResource() } }
+                if let size = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize,
+                   UInt64(max(0, size)) <= FileChunk.maxTotal,
+                   let data = try? Data(contentsOf: url) {
+                    loaded.append((url.lastPathComponent, data))
+                }
+            }
+            DispatchQueue.main.async {
+                guard let self, !loaded.isEmpty else { return }
+                _ = self.sendFiles(loaded, at: location)
+            }
+        }
+    }
+
+    /// Handles drag-and-drop `NSItemProvider` items dropped onto the stream screen.
+    func handleFileDrop(_ providers: [NSItemProvider], at point: CGPoint, in streamRect: CGRect?) -> Bool {
+        guard connected, hostFileDrop, !providers.isEmpty else { return false }
+        let normalized: CGPoint
+        if let rect = streamRect, rect.width > 0, rect.height > 0 {
+            normalized = CGPoint(
+                x: min(max((point.x - rect.minX) / rect.width, 0), 1),
+                y: min(max((point.y - rect.minY) / rect.height, 0), 1)
+            )
+        } else {
+            normalized = CGPoint(x: 0.5, y: 0.5)
+        }
+        let group = DispatchGroup()
+        let lock = NSLock()
+        var loaded: [(name: String, data: Data)] = []
+        for provider in providers where provider.hasItemConformingToTypeIdentifier(UTType.item.identifier) {
+            group.enter()
+            let fallbackName = provider.suggestedName ?? "file"
+            provider.loadFileRepresentation(forTypeIdentifier: UTType.item.identifier) { url, _ in
+                defer { group.leave() }
+                guard let url,
+                      let data = try? Data(contentsOf: url),
+                      UInt64(data.count) <= FileChunk.maxTotal else { return }
+                let name = url.lastPathComponent.isEmpty ? fallbackName : url.lastPathComponent
+                lock.lock()
+                loaded.append((name, data))
+                lock.unlock()
+            }
+        }
+        group.notify(queue: .main) { [weak self] in
+            guard let self, !loaded.isEmpty else { return }
+            _ = self.sendFiles(loaded, at: normalized)
+        }
+        return true
+    }
+
+    // MARK: The microphone (kind 45, Roadmap Item 9)
+
+    static let microphoneKey = "Sill.shareMicrophone"
+    static var microphoneOn: Bool {
+        UserDefaults.standard.bool(forKey: microphoneKey)
+    }
+
+    func updateMicrophoneCapture() {
+        let supported = (hostMicrophone ?? 0) >= MicrophoneCodec.generation
+        if connected && supported && Self.microphoneOn {
+            startMicrophoneCapture()
+        } else {
+            stopMicrophoneCapture(sendStop: connected && supported)
+        }
+    }
+
+    func startMicrophoneCapture() {
+        if let existing = microphoneSender as? DeviceMicrophoneCapture, existing.isRunning { return }
+        let cap = DeviceMicrophoneCapture { [weak self] message in
+            DispatchQueue.main.async {
+                guard let self, self.connected else { return }
+                self.send(.microphone, payload: message.serialized())
+            }
+        }
+        microphoneSender = cap
+        cap.start()
+    }
+
+    func stopMicrophoneCapture(sendStop: Bool) {
+        if let existing = microphoneSender as? DeviceMicrophoneCapture {
+            existing.stop()
+            microphoneSender = nil
+            if sendStop {
+                let stopMsg = MicrophoneMessage.format(MicrophoneFormat(stop: true))
+                send(.microphone, payload: stopMsg.serialized())
+            }
+        }
+    }
+
+    // MARK: The camera (kind 46, Roadmap Item 10)
+
+    static let cameraKey = "Sill.shareCamera"
+    static var cameraOn: Bool {
+        UserDefaults.standard.bool(forKey: cameraKey)
+    }
+
+    func updateCameraCapture() {
+        let supported = (hostCamera ?? 0) >= CameraCodec.generation
+        if connected && supported && Self.cameraOn {
+            startCameraCapture()
+        } else {
+            stopCameraCapture(sendStop: connected && supported)
+        }
+    }
+
+    func startCameraCapture() {
+        if let existing = cameraSender as? DeviceCameraCapture, existing.isRunning { return }
+        let cap = DeviceCameraCapture { [weak self] message in
+            DispatchQueue.main.async {
+                guard let self, self.connected else { return }
+                self.send(.camera, payload: message.serialized())
+            }
+        }
+        cameraSender = cap
+        cap.start()
+    }
+
+    func stopCameraCapture(sendStop: Bool) {
+        if let existing = cameraSender as? DeviceCameraCapture {
+            existing.stop()
+            cameraSender = nil
+            if sendStop {
+                let stopMsg = CameraMessage.format(CameraFormat(stop: true))
+                send(.camera, payload: stopMsg.serialized())
+            }
+        }
+    }
+}
+
+final class DeviceMicrophoneCapture {
+    private let onMessage: (MicrophoneMessage) -> Void
+    private var engine: AVAudioEngine?
+    private var converter: AVAudioConverter?
+    private var epoch: Int = Int.random(in: 1...65_000)
+    private var seq: UInt32 = 0
+    private(set) var isRunning = false
+
+    init(onMessage: @escaping (MicrophoneMessage) -> Void) {
+        self.onMessage = onMessage
+    }
+
+    func start() {
+        guard !isRunning else { return }
+        AVAudioApplication.requestRecordPermission { [weak self] granted in
+            DispatchQueue.main.async {
+                guard granted, let self else { return }
+                self.beginEngine()
+            }
+        }
+    }
+
+    private func beginEngine() {
+        guard !isRunning else { return }
+        do {
+            let session = AVAudioSession.sharedInstance()
+            try session.setCategory(.playAndRecord, mode: .voiceChat, options: [.defaultToSpeaker, .allowBluetoothHFP])
+            try session.setActive(true)
+            let eng = AVAudioEngine()
+            let input = eng.inputNode
+            let inFmt = input.inputFormat(forBus: 0)
+            guard inFmt.sampleRate > 0, inFmt.channelCount > 0,
+                  let outFmt = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 48_000, channels: 1, interleaved: true),
+                  let conv = AVAudioConverter(from: inFmt, to: outFmt) else { return }
+            converter = conv
+            epoch = (epoch + 1) & 0xFFFF
+            seq = 0
+            onMessage(.format(MicrophoneFormat(codec: MicrophoneCodec.pcm16, sampleRate: 48_000, channels: 1, framesPerPacket: 480, epoch: epoch)))
+            let currentEpoch = epoch
+            input.installTap(onBus: 0, bufferSize: 1024, format: inFmt) { [weak self] buffer, _ in
+                guard let self, let outBuf = AVAudioPCMBuffer(pcmFormat: outFmt, frameCapacity: 1024) else { return }
+                var error: NSError?
+                var supplied = false
+                conv.convert(to: outBuf, error: &error) { _, status in
+                    if supplied { status.pointee = .noDataNow; return nil }
+                    supplied = true
+                    status.pointee = .haveData
+                    return buffer
+                }
+                let frames = Int(outBuf.frameLength)
+                guard error == nil, frames > 0, let ptr = outBuf.int16ChannelData?[0] else { return }
+                let bytes = Data(bytes: ptr, count: frames * 2)
+                let s = self.seq
+                self.seq &+= 1
+                self.onMessage(.packets(MicrophonePackets(epoch: currentEpoch, seq: s, segmentStart: s == 0, packets: [bytes])))
+            }
+            try eng.start()
+            engine = eng
+            isRunning = true
+        } catch {}
+    }
+
+    func stop() {
+        guard isRunning else { return }
+        engine?.inputNode.removeTap(onBus: 0)
+        engine?.stop()
+        engine = nil
+        converter = nil
+        isRunning = false
+        try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
+    }
+}
+
+final class DeviceCameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
+    private let onMessage: (CameraMessage) -> Void
+    private let captureQueue = DispatchQueue(label: "me.saffer.sill.camera")
+    private let ciContext = CIContext()
+    private let colorSpace = CGColorSpaceCreateDeviceRGB()
+    private var session: AVCaptureSession?
+    private var epoch: Int = Int.random(in: 1...65_000)
+    private var seq: UInt32 = 0
+    private var lastFrameAt: CFTimeInterval = 0
+    private(set) var isRunning = false
+
+    init(onMessage: @escaping (CameraMessage) -> Void) {
+        self.onMessage = onMessage
+    }
+
+    func start() {
+        guard !isRunning else { return }
+        AVCaptureDevice.requestAccess(for: .video) { [weak self] granted in
+            DispatchQueue.main.async {
+                guard granted, let self else { return }
+                self.beginSession()
+            }
+        }
+    }
+
+    private func beginSession() {
+        guard !isRunning else { return }
+        guard let device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .front)
+                ?? AVCaptureDevice.default(for: .video),
+              let input = try? AVCaptureDeviceInput(device: device) else { return }
+        let sess = AVCaptureSession()
+        sess.beginConfiguration()
+        if sess.canSetSessionPreset(.vga640x480) {
+            sess.sessionPreset = .vga640x480
+        }
+        guard sess.canAddInput(input) else { sess.commitConfiguration(); return }
+        sess.addInput(input)
+        let output = AVCaptureVideoDataOutput()
+        output.alwaysDiscardsLateVideoFrames = true
+        output.setSampleBufferDelegate(self, queue: captureQueue)
+        guard sess.canAddOutput(output) else { sess.commitConfiguration(); return }
+        sess.addOutput(output)
+        sess.commitConfiguration()
+
+        epoch = (epoch + 1) & 0xFFFF
+        seq = 0
+        let pos = device.position == .back ? CameraCodec.positionBack : CameraCodec.positionFront
+        onMessage(.format(CameraFormat(codec: CameraCodec.jpeg, width: 640, height: 480, fps: 15, position: pos, epoch: epoch)))
+        session = sess
+        isRunning = true
+        captureQueue.async {
+            sess.startRunning()
+        }
+    }
+
+    func stop() {
+        guard isRunning else { return }
+        isRunning = false
+        let sess = session
+        session = nil
+        captureQueue.async {
+            sess?.stopRunning()
+        }
+    }
+
+    func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
+        let now = CACurrentMediaTime()
+        guard now - lastFrameAt >= (1.0 / 15.0) else { return }
+        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+        lastFrameAt = now
+        let w = CVPixelBufferGetWidth(pixelBuffer)
+        let h = CVPixelBufferGetHeight(pixelBuffer)
+        let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
+        guard w > 0, h > 0,
+              let jpeg = ciContext.jpegRepresentation(of: ciImage, colorSpace: colorSpace,
+                                                      options: [kCGImageDestinationLossyCompressionQuality as CIImageRepresentationOption: 0.65]),
+              jpeg.count <= CameraFrame.maxFrameBytes else { return }
+        let s = seq
+        seq &+= 1
+        onMessage(.frame(CameraFrame(epoch: epoch, seq: s, width: w, height: h, keyframe: true, data: jpeg)))
     }
 }

@@ -49,15 +49,32 @@ struct HostSettingsPanel: View {
     /// picture's input view and the on-screen trackpad as each scroll begins (`ScrollDirection`), never
     /// sent.
     @AppStorage(StreamClient.reverseScrollKey) private var reverseScroll = false
+    /// This device's switch for Control + a two-finger trackpad stroke as the four swipes: off unless
+    /// turned on, read by the input view at each stroke, never sent.
+    @AppStorage(InputOverlayView.trackpadControlSwipeKey) private var trackpadControlSwipe = false
     /// This device's switch for Larger Picture (docs/larger-picture-plan.md): off unless turned on,
     /// read by the stream screen, never sent.
     @AppStorage(StreamClient.largerPictureKey) private var largerPicture = false
     /// Whether the switch is offered here, the stream screen's say (`largerPictureOffered`): only on an
     /// iPhone without a hinge whose picture it makes larger.
     @Environment(\.largerPictureOffered) private var offersLargerPicture
+    /// This iPad's Immersive switch (docs/immersive-plan.md): off unless turned on, read by the stream
+    /// screen, never sent; offered on an iPad only (`immersiveOffered`).
+    @AppStorage(StreamClient.immersiveKey) private var immersive = false
+    @Environment(\.immersiveOffered) private var offersImmersive
     /// This device's switch for the clipboard (docs/clipboard-plan.md): on unless turned off, read by
     /// StreamClient+Clipboard at each decision; a change subscribes or stops at once.
     @AppStorage(StreamClient.clipboardKey) private var clipboardOn = true
+    /// This device's Left Option as Command (InputOverlayView, ForwardedKeys): off unless turned on,
+    /// read at each key press, never sent.
+    @AppStorage(InputOverlayView.leftOptionAsCommandKey) private var leftOptionAsCommand = false
+    /// This device's Reverse Trackpad Scrolling (InputOverlayView): off unless turned on, read at each
+    /// scroll event, never sent.
+    @AppStorage(InputOverlayView.reverseTrackpadScrollKey) private var reverseTrackpadScroll = false
+    /// This device's switch for streaming its microphone to the Mac (Roadmap Item 9): off by default.
+    @AppStorage(StreamClient.microphoneKey) private var microphoneOn = false
+    /// This device's switch for streaming its camera to the Mac (Roadmap Item 10): off by default.
+    @AppStorage(StreamClient.cameraKey) private var cameraOn = false
     /// VoiceOver is on: it keeps three-finger swipes and taps for itself, so the This iPad group says
     /// its rows do the gestures instead.
     @State private var voiceOver = HostSettingsPanel.voiceOverRunning
@@ -550,6 +567,15 @@ struct HostSettingsPanel: View {
             }
             Footnote(text: Self.largerPictureFooter)
         }
+        if offersImmersive {
+            Rows {
+                Toggle(isOn: $immersive) {
+                    Text("Immersive").foregroundStyle(Palette.text)
+                }
+                .rowFrame()
+            }
+            Footnote(text: Self.immersiveFooter)
+        }
         // The clipboard (docs/clipboard-plan.md): only while the Mac says it shares it.
         if ClipboardPolicy.hostTakes(client.hostClipboard) {
             Rows {
@@ -562,6 +588,10 @@ struct HostSettingsPanel: View {
                     RowDivider()
                     ClipboardPasteRow(client: client, title: ClipboardPolicy.Copy.rowTitle(mac: mac))
                 }
+                if client.hostFileDrop {
+                    RowDivider()
+                    SendFileRow(client: client, mac: mac)
+                }
             }
             if clipboardOn, let note = client.clipboardNote {
                 Footnote(text: note.text, warning: note.warning, top: 6)
@@ -569,6 +599,33 @@ struct HostSettingsPanel: View {
                     .accessibilityHidden(true)      // announced as it came
             }
             Footnote(text: ClipboardPolicy.Copy.footnote(on: clipboardOn, mac: mac, device: device))
+        } else if client.hostFileDrop {
+            Rows {
+                SendFileRow(client: client, mac: mac)
+            }
+            if let note = client.clipboardNote {
+                Footnote(text: note.text, warning: note.warning, top: 6)
+            }
+        }
+        if (client.hostMicrophone ?? 0) >= MicrophoneCodec.generation {
+            Rows {
+                Toggle(isOn: $microphoneOn) {
+                    Text("Share Microphone").foregroundStyle(Palette.text)
+                }
+                .rowFrame()
+                .onChange(of: microphoneOn) { _, _ in client.updateMicrophoneCapture() }
+            }
+            Footnote(text: "Streams this \(device)’s microphone to \(mac) while connected.")
+        }
+        if (client.hostCamera ?? 0) >= CameraCodec.generation {
+            Rows {
+                Toggle(isOn: $cameraOn) {
+                    Text("Share Camera").foregroundStyle(Palette.text)
+                }
+                .rowFrame()
+                .onChange(of: cameraOn) { _, _ in client.updateCameraCapture() }
+            }
+            Footnote(text: "Streams this \(device)’s camera to \(mac) while connected.")
         }
         Rows {
             Toggle(isOn: $reverseScroll) {
@@ -593,6 +650,39 @@ struct HostSettingsPanel: View {
             }
         }
         Footnote(text: gesturesFooter)
+<<<<<<< Updated upstream
+=======
+        if gesturesOn, device == "iPad" {
+            Rows {
+                Toggle(isOn: $trackpadControlSwipe) {
+                    Text("Control + Swipe on Trackpad").foregroundStyle(Palette.text)
+                }
+                .rowFrame()
+            }
+            Footnote(text: "iPadOS keeps three-finger trackpad swipes for itself. With this on, holding Control while "
+                     + "swiping two fingers on the trackpad does the same on \(mac): left or right switches Spaces, "
+                     + "up opens Mission Control, down App Exposé. The stroke is not scrolled. It follows the "
+                     + "Reverse Trackpad Scrolling setting below.")
+        }
+>>>>>>> Stashed changes
+        Rows {
+            Toggle(isOn: $leftOptionAsCommand) {
+                Text("Left Option Key as Command").foregroundStyle(Palette.text)
+            }
+            .rowFrame()
+        }
+        Footnote(text: "\(device == "iPad" ? "iPadOS" : "iOS") keeps ⌘Space and ⌘Tab for itself. With this on, "
+                 + "a hardware keyboard’s left Option key is Command on \(mac): ⌥Space opens Spotlight and "
+                 + "⌥Tab switches apps. The right Option key stays Option.")
+        Rows {
+            Toggle(isOn: $reverseTrackpadScroll) {
+                Text("Reverse Trackpad Scrolling").foregroundStyle(Palette.text)
+            }
+            .rowFrame()
+        }
+        Footnote(text: "A trackpad or mouse wheel scrolls \(mac) in the direction this \(device) is set to "
+                 + "(Settings › Trackpad › Natural Scrolling). Turn this on to reverse it for \(mac) only. "
+                 + "Touch scrolling is not affected.")
     }
 
     /// Under Send Audio's switch and the Mute row below it (docs/audio-plan.md §7.7): on, that every
@@ -630,6 +720,8 @@ struct HostSettingsPanel: View {
     /// it gives up, where windows come from instead, that the Mac fits a window to the taller picture
     /// once Aa sets its text size (or on the virtual display), and that a change applies as the panel
     /// closes (StreamScreen's `largerPictureHeld`).
+    static let immersiveFooter = "With a hardware keyboard attached and the iPad held sideways, the picture fills the whole screen and the bar hides. Press Control-Option-Command-B, or swipe down from the top edge, to show it; Exit in the bar turns Immersive off. A change here applies when you close Settings."
+
     static let largerPictureFooter = "Held upright, a window’s picture takes the place of the window thumbnails and reaches down to where the keyboard comes up. The Desktop keeps the thumbnails. Switch windows with Apps: tap an open app again for its next window. To fill the taller picture with a window, set its text size with Aa. A change applies when you close Settings."
 
     /// What each gesture does on the Mac, and what the row does as an accessibility action: its one
@@ -1004,5 +1096,18 @@ extension EnvironmentValues {
     var largerPictureOffered: Bool {
         get { self[LargerPictureOfferedKey.self] }
         set { self[LargerPictureOfferedKey.self] = newValue }
+    }
+}
+
+/// Whether the Settings panel offers Immersive (This iPad; docs/immersive-plan.md): the stream screen's
+/// say, true on an iPad, false on every iPhone.
+private struct ImmersiveOfferedKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
+extension EnvironmentValues {
+    var immersiveOffered: Bool {
+        get { self[ImmersiveOfferedKey.self] }
+        set { self[ImmersiveOfferedKey.self] = newValue }
     }
 }

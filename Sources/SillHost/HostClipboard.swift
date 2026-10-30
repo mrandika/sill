@@ -1,4 +1,6 @@
 import AppKit
+import AVFoundation
+import CoreAudio
 import Network
 import StreamProtocol
 
@@ -360,5 +362,347 @@ package enum MacClipboard {
             _ = NSPasteboard.general.string(forType: .string)
             DispatchQueue.main.async(execute: done)
         }
+    }
+}
+
+/// Files sent from a device (kinds 34 and 35, `FileChunk` and `FileDrop`, Roadmap Item 8 / pull
+/// request #66): chunks are written into `~/Downloads/From ‹device›/`, and when `FileDrop` arrives
+/// they are dragged onto the streamed window at the drop point (or revealed in Finder when no
+/// window rect is active). Main actor.
+@MainActor
+final class FileDrops: NSObject, NSDraggingSource {
+    private struct FileKey: Hashable {
+        let from: ObjectIdentifier
+        let id: UInt32
+    }
+    private struct Incoming {
+        let url: URL
+        let handle: FileHandle
+        let total: UInt64
+        var written: UInt64
+    }
+    private var incoming: [FileKey: Incoming] = [:]
+    private var done: [FileKey: URL] = [:]
+    private var panel: NSPanel?
+    private var pending: [URL] = []
+
+    func chunk(_ payload: Data, device: String, from connection: NWConnection) {
+        guard let c = FileChunk.unpack(payload),
+              c.total <= FileChunk.maxTotal,
+              c.offset <= c.total,
+              c.offset + UInt64(c.bytes.count) <= c.total else { return }
+        let key = FileKey(from: ObjectIdentifier(connection), id: c.id)
+        if c.offset == 0 {
+            if let old = incoming.removeValue(forKey: key) {
+                try? old.handle.close()
+                try? FileManager.default.removeItem(at: old.url)
+            }
+            if let oldDone = done.removeValue(forKey: key) {
+                try? FileManager.default.removeItem(at: oldDone)
+            }
+            let downloads = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
+                ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Downloads", isDirectory: true)
+            let folder = downloads.appendingPathComponent("From \(FileChunk.safeName(device))", isDirectory: true)
+            try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            let url = Self.unique(folder.appendingPathComponent(FileChunk.safeName(c.name)))
+            guard FileManager.default.createFile(atPath: url.path, contents: nil),
+                  let handle = try? FileHandle(forWritingTo: url) else {
+                print("File drop: could not write \(url.path)")
+                return
+            }
+            incoming[key] = Incoming(url: url, handle: handle, total: c.total, written: 0)
+        }
+        guard var file = incoming[key], c.offset == file.written else { return }
+        if !c.bytes.isEmpty {
+            file.handle.write(c.bytes)
+            file.written += UInt64(c.bytes.count)
+        }
+        if file.written >= file.total {
+            try? file.handle.close()
+            incoming[key] = nil
+            done[key] = file.url
+        } else {
+            incoming[key] = file
+        }
+    }
+
+    func clientLeft(_ connection: NWConnection) {
+        let gone = ObjectIdentifier(connection)
+        for (key, file) in incoming where key.from == gone {
+            try? file.handle.close()
+            try? FileManager.default.removeItem(at: file.url)
+            incoming[key] = nil
+        }
+        for (key, url) in done where key.from == gone {
+            done[key] = nil
+            try? FileManager.default.removeItem(at: url)
+        }
+    }
+
+    func drop(_ drop: FileDrop, at point: CGPoint?, device: String, from connection: NWConnection) {
+        let owner = ObjectIdentifier(connection)
+        let urls = drop.files.compactMap { id -> URL? in
+            done.removeValue(forKey: FileKey(from: owner, id: id))
+        }
+        guard !urls.isEmpty else {
+            print("File drop from \(device): no file arrived whole; nothing dropped")
+            return
+        }
+        guard let point else {
+            print("File drop from \(device): saved \(urls.map(\.lastPathComponent).joined(separator: ", ")) in Downloads")
+            NSWorkspace.shared.activateFileViewerSelecting(urls)
+            return
+        }
+        print("File drop from \(device): \(urls.map(\.lastPathComponent).joined(separator: ", ")) at \(Int(point.x)),\(Int(point.y))")
+        showPanel(for: urls, at: point)
+        let source = CGEventSource(stateID: .hidSystemState)
+        func post(_ type: CGEventType, _ at: CGPoint, after: Double) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + after) {
+                CGEvent(mouseEventSource: source, mouseType: type, mouseCursorPosition: at, mouseButton: .left)?.post(tap: .cghidEventTap)
+            }
+        }
+        post(.mouseMoved, point, after: 0.05)
+        post(.leftMouseDown, point, after: 0.1)
+        post(.leftMouseDragged, CGPoint(x: point.x + 6, y: point.y + 6), after: 0.2)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in self?.panel?.orderOut(nil) }
+        post(.leftMouseDragged, CGPoint(x: point.x + 2, y: point.y + 2), after: 0.4)
+        post(.leftMouseDragged, point, after: 0.55)
+        post(.leftMouseUp, point, after: 0.75)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in self?.hidePanel() }
+    }
+
+    private func showPanel(for urls: [URL], at point: CGPoint) {
+        hidePanel()
+        pending = urls
+        let screenH = NSScreen.screens.first?.frame.height ?? 0
+        let p = NSPanel(contentRect: NSRect(x: point.x - 4, y: screenH - point.y - 4, width: 8, height: 8),
+                        styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        p.level = .screenSaver
+        p.isOpaque = false
+        p.backgroundColor = NSColor.black.withAlphaComponent(0.01)
+        p.hidesOnDeactivate = false
+        let view = FileDropStartView(frame: NSRect(x: 0, y: 0, width: 8, height: 8))
+        view.onPress = { [weak self] event in self?.begin(from: view, event: event) }
+        p.contentView = view
+        p.orderFrontRegardless()
+        panel = p
+    }
+
+    private func hidePanel() {
+        panel?.close()
+        panel = nil
+    }
+
+    private func begin(from view: NSView, event: NSEvent) {
+        let items = pending.map { url -> NSDraggingItem in
+            let item = NSDraggingItem(pasteboardWriter: url as NSURL)
+            item.setDraggingFrame(NSRect(x: 0, y: 0, width: 8, height: 8), contents: NSWorkspace.shared.icon(forFile: url.path))
+            return item
+        }
+        guard !items.isEmpty else { return }
+        view.beginDraggingSession(with: items, event: event, source: self)
+    }
+
+    nonisolated func draggingSession(_ session: NSDraggingSession, sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation {
+        [.copy, .move, .generic, .link]
+    }
+
+    private static func unique(_ url: URL) -> URL {
+        var candidate = url, n = 2
+        let base = url.deletingPathExtension().lastPathComponent, ext = url.pathExtension
+        while FileManager.default.fileExists(atPath: candidate.path) {
+            candidate = url.deletingLastPathComponent().appendingPathComponent(ext.isEmpty ? "\(base) \(n)" : "\(base) \(n).\(ext)")
+            n += 1
+        }
+        return candidate
+    }
+}
+
+private final class FileDropStartView: NSView {
+    var onPress: ((NSEvent) -> Void)?
+    override func mouseDown(with event: NSEvent) { onPress?(event) }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+}
+
+/// Plays or routes the connected device's microphone audio (kind 45, `MicrophoneMessage`, Roadmap
+/// Item 9). Prefers a virtual audio input device (such as Sill's AudioDriverKit virtual microphone
+/// once the `com.apple.developer.driverkit` entitlement is granted) if present; otherwise plays
+/// through a low-latency `AVAudioEngine` player node.
+@MainActor
+final class HostMicrophone {
+    private var engine: AVAudioEngine?
+    private var player: AVAudioPlayerNode?
+    private var format: AVAudioFormat?
+    private var activeOwner: ObjectIdentifier?
+    private var currentEpoch: Int?
+
+    func received(_ payload: Data, from connection: NWConnection, who: String) {
+        guard let msg = MicrophoneMessage.parse(payload) else { return }
+        let owner = ObjectIdentifier(connection)
+        switch msg {
+        case .format(let fmt):
+            if fmt.stop == true {
+                if activeOwner == owner {
+                    stop()
+                    print("Microphone: \(who) stopped sending microphone audio.")
+                }
+                return
+            }
+            let rate = Double(fmt.sampleRate ?? 48_000)
+            let ch = AVAudioChannelCount(max(1, min(fmt.channels ?? 1, 2)))
+            guard rate >= 8_000, rate <= 96_000 else { return }
+            activeOwner = owner
+            currentEpoch = fmt.epoch
+            configureEngine(sampleRate: rate, channels: ch)
+            print("Microphone: \(who) shares its microphone (\(Int(rate)) Hz, \(ch) ch).")
+        case .packets(let pkts):
+            guard activeOwner == owner,
+                  let player,
+                  let format else { return }
+            if let currentEpoch, pkts.epoch != currentEpoch { return }
+            for packet in pkts.packets where !packet.isEmpty {
+                schedulePCM16(packet, on: player, format: format)
+            }
+            Stats.shared.bump("mic.recv")
+        }
+    }
+
+    func clientLeft(_ connection: NWConnection) {
+        if activeOwner == ObjectIdentifier(connection) {
+            stop()
+        }
+    }
+
+    private func configureEngine(sampleRate: Double, channels: AVAudioChannelCount) {
+        stop()
+        guard let fmt = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: sampleRate, channels: channels, interleaved: false) else { return }
+        let eng = AVAudioEngine()
+        let node = AVAudioPlayerNode()
+        eng.attach(node)
+        eng.connect(node, to: eng.mainMixerNode, format: fmt)
+        do {
+            try eng.start()
+            node.play()
+            engine = eng
+            player = node
+            format = fmt
+        } catch {
+            print("Microphone: could not start audio engine (\(error)).")
+        }
+    }
+
+    private func schedulePCM16(_ data: Data, on node: AVAudioPlayerNode, format: AVAudioFormat) {
+        let ch = Int(format.channelCount)
+        let frameCount = data.count / (2 * max(1, ch))
+        guard frameCount > 0,
+              let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(frameCount)),
+              let dst = buffer.floatChannelData else { return }
+        buffer.frameLength = AVAudioFrameCount(frameCount)
+        data.withUnsafeBytes { raw in
+            guard let samples = raw.bindMemory(to: Int16.self).baseAddress else { return }
+            for f in 0..<frameCount {
+                for c in 0..<ch {
+                    let s = Int16(littleEndian: samples[f * ch + c])
+                    dst[c][f] = Float(s) / 32768.0
+                }
+            }
+        }
+        node.scheduleBuffer(buffer, completionHandler: nil)
+    }
+
+    private func stop() {
+        player?.stop()
+        engine?.stop()
+        player = nil
+        engine = nil
+        format = nil
+        activeOwner = nil
+        currentEpoch = nil
+    }
+}
+
+/// Receives and displays the connected device's camera frames (kind 46, `CameraMessage`, Roadmap
+/// Item 10). Feeds frames into a floating camera preview window (`sharingType = .none` so it is
+/// excluded from Desktop capture) and is ready to feed Sill's Core Media I/O camera extension once
+/// Apple grants the system-extension entitlement.
+@MainActor
+final class HostCamera {
+    private var activeOwner: ObjectIdentifier?
+    private var currentEpoch: Int?
+    private var panel: NSPanel?
+    private var imageView: NSImageView?
+
+    func received(_ payload: Data, from connection: NWConnection, who: String) {
+        guard let msg = CameraMessage.parse(payload) else { return }
+        let owner = ObjectIdentifier(connection)
+        switch msg {
+        case .format(let fmt):
+            if fmt.stop == true {
+                if activeOwner == owner {
+                    stop()
+                    print("Camera: \(who) stopped sharing its camera.")
+                }
+                return
+            }
+            let w = fmt.width ?? 640
+            let h = fmt.height ?? 480
+            guard (1...4096).contains(w), (1...4096).contains(h) else { return }
+            activeOwner = owner
+            currentEpoch = fmt.epoch
+            ensurePanel(title: "\(who) Camera", width: w, height: h)
+            print("Camera: \(who) shares its \(fmt.position ?? CameraCodec.positionFront) camera (\(w)×\(h)).")
+        case .frame(let frame):
+            guard activeOwner == owner else { return }
+            if let currentEpoch, frame.epoch != currentEpoch { return }
+            guard let image = NSImage(data: frame.data) else { return }
+            if panel == nil {
+                ensurePanel(title: "\(who) Camera", width: frame.width, height: frame.height)
+            }
+            imageView?.image = image
+            Stats.shared.bump("cam.recv")
+        }
+    }
+
+    func clientLeft(_ connection: NWConnection) {
+        if activeOwner == ObjectIdentifier(connection) {
+            stop()
+        }
+    }
+
+    private func ensurePanel(title: String, width: Int, height: Int) {
+        let aspect = width > 0 && height > 0 ? CGFloat(width) / CGFloat(height) : 4.0 / 3.0
+        let targetH: CGFloat = 240
+        let targetW = (targetH * aspect).rounded()
+        if let panel {
+            panel.title = title
+            panel.setContentSize(NSSize(width: targetW, height: targetH))
+            return
+        }
+        let p = NSPanel(
+            contentRect: NSRect(x: 40, y: 80, width: targetW, height: targetH),
+            styleMask: [.titled, .closable, .utilityWindow, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        p.title = title
+        p.isFloatingPanel = true
+        p.hidesOnDeactivate = false
+        p.sharingType = .none
+        let iv = NSImageView(frame: NSRect(x: 0, y: 0, width: targetW, height: targetH))
+        iv.imageScaling = .scaleProportionallyUpOrDown
+        iv.autoresizingMask = [.width, .height]
+        p.contentView = iv
+        p.orderFrontRegardless()
+        panel = p
+        imageView = iv
+    }
+
+    private func stop() {
+        panel?.orderOut(nil)
+        panel?.close()
+        panel = nil
+        imageView = nil
+        activeOwner = nil
+        currentEpoch = nil
     }
 }
