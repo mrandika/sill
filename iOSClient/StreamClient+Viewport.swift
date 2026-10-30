@@ -99,6 +99,18 @@ extension StreamClient {
         let screen = (scenes.first { $0.activationState == .foregroundActive } ?? scenes.first)?.screen
         return max(30, screen?.maximumFramesPerSecond ?? 60)
     }
+
+    /// The physical pixels this device's screen has per point of its current layout (`nativeScale`,
+    /// `Viewport.pixelScale`): 2 on an iPad Pro 11" at its default size, about 1.72 when the iPad is set
+    /// to a layout with more room (1388×970 points drawn at 2x and shrunk onto the 2388×1668-pixel
+    /// panel). A host holds a capture to the panel's pixels with it. `fallback` (the environment's
+    /// display scale) when no scene has a screen.
+    static func screenPixelsPerPoint(fallback: Double) -> Double {
+        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+        let screen = (scenes.first { $0.activationState == .foregroundActive } ?? scenes.first)?.screen
+        guard let native = screen?.nativeScale, native.isFinite, native > 0 else { return fallback }
+        return Double(native)
+    }
 }
 
 /// `setLocalCursor`'s bookkeeping. An extension cannot add stored properties, so it hangs off the

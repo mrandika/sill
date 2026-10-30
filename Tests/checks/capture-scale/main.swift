@@ -520,5 +520,33 @@ check(stageUnheld == 0, "20,000 random panels and scales: every window 1 to 6553
 check(stageNotAsBefore == 0, "wherever the old size was within 1…65536, the same as before (\(stageNotAsBefore) not)")
 check(stageNotOwn == 0, "a panel whose sides are not positive numbers: the window's own size (\(stageNotOwn) not)")
 
+// A device's own desktop held to its panel's pixels (2026-10-30: an iPad Pro 11" at Aa 0.65 captured
+// 3704×2588 for a 2388×1668 panel). The display is the panel ÷ Aa in points, captured at 2x.
+let panelPx = CGSize(width: 1194 * 2, height: 834 * 2)
+let ipadDisplay = CGSize(width: 1852, height: 1294)
+let held = CaptureScale.heldToPanel(2, display: ipadDisplay, panelPixels: panelPx)
+check(held < 2 && abs(ipadDisplay.width * held - 2388) < 1, "Aa 0.65 on an iPad Pro 11\": the capture is the panel's 2388 pixels wide, not 3704")
+// The same iPad in a layout with more room: 1388×970 points at 1.72 pixels a point is the 2388×1668 panel.
+let moreRoom = CGSize(width: 1388 * 1.72, height: 970 * 1.72)
+let heldMore = CaptureScale.heldToPanel(2, display: ipadDisplay, panelPixels: moreRoom)
+check(abs(ipadDisplay.width * heldMore - 2387.36) < 1 && ipadDisplay.width * heldMore < 2388.5, "a layout with more room: the panel's physical 2388 pixels, not the 2776 it is drawn at")
+check(CaptureScale.heldToPanel(2, display: CGSize(width: 1194, height: 834), panelPixels: panelPx) == 2, "Aa 1x: the display is the panel's size, captured at 2x as before")
+check(CaptureScale.heldToPanel(2, display: CGSize(width: 796, height: 556), panelPixels: panelPx) == 2, "Aa 1.5x: a display smaller than the panel is not captured at less than the knob")
+check(CaptureScale.heldToPanel(2, display: ipadDisplay, panelPixels: nil) == 2, "a device that sent no screen scale: the knob, as before")
+check(CaptureScale.heldToPanel(1, display: ipadDisplay, panelPixels: panelPx) == 1, "Standard (1x) is never raised to the panel's pixels")
+check(CaptureScale.heldToPanel(2, display: ipadDisplay, panelPixels: CGSize(width: 0, height: 100)) == 2
+      && CaptureScale.heldToPanel(2, display: ipadDisplay, panelPixels: CGSize(width: CGFloat.nan, height: 100)) == 2
+      && CaptureScale.heldToPanel(2, display: .zero, panelPixels: panelPx) == 2, "a panel or display that is not a size: the knob")
+var panelOver = 0, panelRaised = 0
+for _ in 0..<20_000 {
+    let d = CGSize(width: 2 + CGFloat(next() % 8_000), height: 2 + CGFloat(next() % 8_000))
+    let p = CGSize(width: 1 + CGFloat(next() % 16_000), height: 1 + CGFloat(next() % 16_000))
+    let knob = pick([CGFloat(1), 2])
+    let s = CaptureScale.heldToPanel(knob, display: d, panelPixels: p)
+    if s > knob { panelRaised += 1 }
+    if d.width * s > p.width + 1e-6 || d.height * s > p.height + 1e-6, s != knob { panelOver += 1 }
+}
+check(panelRaised == 0 && panelOver == 0, "20,000 random displays and panels: never above the knob, never more pixels than the panel's (\(panelRaised), \(panelOver) not)")
+
 print("\(checks) checks, \(failures) failed")
 exit(failures == 0 ? 0 : 1)

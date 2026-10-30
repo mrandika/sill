@@ -1850,7 +1850,7 @@ package final class StreamCoordinator {
                     guard !shuttingDown else { deviceDesktop.release(); active = .none; broadcastList(); return }
                 }
                 // The display as the newest look has it, read after every await (`desktopCapture`).
-                guard let plan = await desktopCapture(display: deviceDisplay) else { active = .none; broadcastList(); return }
+                guard let plan = await desktopCapture(display: deviceDisplay, panelPixels: deviceDisplay == nil ? nil : viewport.flatMap(ViewportBounds.panelPixels)) else { active = .none; broadcastList(); return }
                 if deviceDisplay == nil,
                    let line = CatalogLook.desktopLine(was: lookBefore.display, now: plan.displayID, age: lookBefore.age) { print(line) }
                 filter = plan.filter
@@ -1917,7 +1917,7 @@ package final class StreamCoordinator {
     /// function's own await, so a look that landed meanwhile is the one used: on 2026-10-28 the filter
     /// was built on a display read before an await, which the look that landed during it had replaced
     /// (CatalogLook). Nil when the catalog has no display, or the host is quitting.
-    private func desktopCapture(display device: SCDisplay? = nil) async -> (filter: SCContentFilter, displayID: UInt32, displayScale: CGFloat?, width: Int, height: Int)? {
+    private func desktopCapture(display device: SCDisplay? = nil, panelPixels: CGSize? = nil) async -> (filter: SCContentFilter, displayID: UInt32, displayScale: CGFloat?, width: Int, height: Int)? {
         guard device != nil || catalog.display != nil else { return nil }
         // Sill's own windows (Settings, Log, the pairing window with its code) never go out
         // in a Desktop stream. Fixed here at pipeline start: a running SCStream is never
@@ -1937,7 +1937,10 @@ package final class StreamCoordinator {
         // At most the display's own scale: ScreenCaptureKit scales a display up to fill a larger
         // buffer (5120×2880 for a 1x 2560×1440 display: four times the pixels to encode).
         let scale = Self.displayScale(of: displayFilter)
-        let pixelScale = CaptureScale.effective(knob: captureScale, displayScale: scale)
+        // The device's own desktop is also held to the panel's pixels (`CaptureScale.heldToPanel`): at Aa
+        // below 1x the display is larger in points than the panel, and the extra pixels only cost the encoder.
+        let pixelScale = CaptureScale.heldToPanel(CaptureScale.effective(knob: captureScale, displayScale: scale),
+                                                   display: CGSize(width: d.width, height: d.height), panelPixels: panelPixels)
         return (displayFilter, d.displayID, scale, evenPixels(CGFloat(d.width) * pixelScale), evenPixels(CGFloat(d.height) * pixelScale))
     }
 

@@ -25,11 +25,17 @@ public struct Viewport: Codable, Hashable {
     /// Desktop streams, as Screen Sharing's High Performance mode does. nil or false (an older
     /// client, or not in full screen) is the Mac's real screen. An older host ignores the key.
     public var deviceDesktop: Bool?
+    /// The device's physical pixels per point of the layout this viewport describes (UIScreen's
+    /// `nativeScale`: 2 on an iPad Pro 11" at its default size, about 1.72 in a layout with more room,
+    /// which the panel shrinks), so a host can hold a capture to the panel's own pixels
+    /// (`ViewportBounds.panelPixels`). nil (an older client) means the host captures as before. An
+    /// older host ignores the key.
+    public var pixelScale: Double?
 
     public init(width: Double, height: Double, scale: Double?, localCursor: Bool? = nil, fps: Int? = nil,
-                deviceDesktop: Bool? = nil) {
+                deviceDesktop: Bool? = nil, pixelScale: Double? = nil) {
         self.width = width; self.height = height; self.scale = scale; self.localCursor = localCursor; self.fps = fps
-        self.deviceDesktop = deviceDesktop
+        self.deviceDesktop = deviceDesktop; self.pixelScale = pixelScale
     }
 }
 
@@ -78,7 +84,20 @@ public enum ViewportBounds {
         held.width = min(max(v.width, sides.lowerBound), sides.upperBound)
         held.height = min(max(v.height, sides.lowerBound), sides.upperBound)
         held.scale = v.scale.flatMap { $0.isFinite && $0 > 0 ? min(max($0, scales.lowerBound), scales.upperBound) : nil }
+        held.pixelScale = v.pixelScale.flatMap { pixelScales.contains($0) ? $0 : nil }
         return held
+    }
+
+    /// A device's physical pixels per point. A host ignores one outside it (it never refuses the
+    /// viewport for it: the capture is then as before).
+    public static let pixelScales: ClosedRange<Double> = 1...4
+
+    /// The device's panel in pixels, its points times its screen scale; nil without a usable
+    /// `pixelScale`.
+    public static func panelPixels(_ v: Viewport) -> CGSize? {
+        guard let s = v.pixelScale, pixelScales.contains(s), v.width.isFinite, v.height.isFinite,
+              v.width > 0, v.height > 0 else { return nil }
+        return CGSize(width: v.width * s, height: v.height * s)
     }
 
     /// A number for a log line as `Int(x)` prints it, toward zero ("1512" for 1512.7), without its

@@ -8,6 +8,26 @@ Formerly winstream; the folder still carries the old name.
 
 ## Current step
 
+**The device's own desktop captured at the panel's pixels (2026-10-30, branch `develop`; the log of an M1 Mac and an
+M2 iPad Pro 11" (iPad14,3), Aa 0.75).** Sill.log: `Capture started: 3704×2588 @60 fps … Streaming the device's own desktop, 1852×1294 pt`,
+`cap.complete` 57 but `enc.out` 39–51 with `enc.mailboxDrop` 8–18, and "frames took 28–37 ms each … a new session
+takes 21 ms" (47 fps at best). The display is the panel ÷ Aa in points (1852×1294) captured at 2x: 9.6 MP to encode
+for a 5.4 MP panel (2776×1940) that scaled it down; the M1's one encode engine does about 460 MP/s, 60 fps of that
+needs 575. Now `CaptureScale.heldToPanel` (pure, `Tests/checks/capture-scale`, 182 checks and 54 of 54 mutants) holds
+the Device Desktop's capture to the panel's pixels (5.4 MP here, 325 MP/s at 60 fps), never above the knob, so Aa at 1x
+and above, Standard and the Mac's real screen capture as before. The device says its screen scale in kind 9's
+additive optional `pixelScale` (`Viewport`, `ViewportBounds.pixelScales` 1 to 4, `panelPixels`; a value outside it is
+ignored, never refused; `viewport-bounds` 98 and 30 of 30); a device from before sends none and is captured as before;
+an older host ignores the key. The device sends the physical pixels per point of its current layout (UIScreen `nativeScale`,
+`StreamClient.screenPixelsPerPoint`: 2 at the iPad Pro 11"'s default size, 1.72 at the layout with 1388×970 points that
+Noah's iPad is in), so the cap is the 2388×1668 panel, not the 2776×1940 it is drawn at; live: "Capture started:
+2386×1668" (even), `enc.out` 56–57 = `cap.complete`, frame age 14 ms (was 19–20). Needs the new Sill.app and iPad build. Built: `swift build -c release`, the iOS app for
+the simulator. Live on the M1 and the iPad (21:38, 40 Mbps): capture 2776×1940, `enc.out` 57.2 = `cap.complete` 57.2, no
+`enc.mailboxDrop`, no second under 50 (was 44.6 on average, 2,851 of 8,281 seconds under 45); after the iPad
+picked Extreme (150 Mbps) 53.3 with 3.4 drops a second. **Untested, for Noah:** with both
+builds, the Desktop in full screen at Aa below 1x: Sill.log's "Capture started: 2776×1940 …" (not 3704×2588), `enc.out`
+near 60 and no `enc.mailboxDrop`, text as sharp as before; Extreme (150 Mbps) still drops frames on this M1.
+
 **The door's waiting places (2026-10-29, branch `sec-door-pending` from main at 150479b5, PR #252; finding 9 of the
 security scan of 2026-10-18, Low; Noah's go of 2026-10-29).** A TLS door (the remote one, and the home one of
 Sill.app and `SillHost --pairing`) held 8 connections waiting for admission, 2 per address, 10 s each, and backed an

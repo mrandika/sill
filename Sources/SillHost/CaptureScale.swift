@@ -46,6 +46,21 @@ enum CaptureScale {
         return min(knob, d)
     }
 
+    /// The pixels a point a device's own desktop is captured at: `scale` (the knob held to the display's
+    /// own) held again to the device's panel, so no more pixels go through the encoder than the panel
+    /// has. Found 2026-10-30 on an M1 Mac streaming an M2 iPad Pro 11" (iPad14,3) with Aa at 0.75: the display is the
+    /// panel ÷ Aa in points (1852×1294) and was captured at 2x, 3704×2588 pixels, 9.6 MP to encode
+    /// for a panel that scaled it down; the M1's one encoder took 21 ms a
+    /// frame (47 fps at best) and the stream ran at 39 to 50. `panelPixels` is the
+    /// viewport's points times the device's physical pixels per point (`ViewportBounds.panelPixels`); nil (a device
+    /// from before `pixelScale`) keeps `scale`. Never more than `scale`, so Aa at 1x and above (the
+    /// display no larger than the panel) captures as before.
+    static func heldToPanel(_ scale: CGFloat, display: CGSize, panelPixels: CGSize?) -> CGFloat {
+        guard let p = panelPixels, display.width > 0, display.height > 0,
+              p.width.isFinite, p.height.isFinite, p.width > 0, p.height > 0 else { return scale }
+        return min(scale, p.width / display.width, p.height / display.height)
+    }
+
     /// A filter's `pointPixelScale` (a Float) as a display scale: nil when it is none.
     static func displayScale(pointPixelScale: Float) -> CGFloat? {
         usable(CGFloat(pointPixelScale))

@@ -139,6 +139,7 @@ struct StreamScreen: View {
     /// The DEBUG harness's stand-in for the camera (the simulator has none); nil on a device.
     private var scannerOverride: CodeScanner.Mode? = nil
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.displayScale) private var displayScale
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     /// The stream panel's size in points, reported by whichever layout is showing.
     @State private var panelSize: CGSize = .zero
@@ -540,7 +541,8 @@ struct StreamScreen: View {
                                          height: Double(panelSize.height),
                                          scale: textScale,
                                          fps: fps,
-                                         deviceDesktop: immersiveDeviceDesktop ? true : nil))
+                                         deviceDesktop: immersiveDeviceDesktop ? true : nil,
+                                         pixelScale: StreamClient.screenPixelsPerPoint(fallback: Double(displayScale))))
         }
     }
 

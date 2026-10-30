@@ -10,6 +10,7 @@ os.makedirs(OUT, exist_ok=True)
 SRC = os.path.join(ROOT, "Sources/SillHost/CaptureScale.swift")
 orig = open(SRC).read()
 HOLD = "        return min(knob, d)\n"
+PANEL = "        return min(scale, p.width / display.width, p.height / display.height)\n"
 USABLE = "        guard let s, s.isFinite, s > 0 else { return nil }\n"
 PIXEL = "        1 / (usable(displayScale) ?? 1)\n"
 LAND = ("        return CGPoint(x: max(rect.minX, min(px, rect.maxX - pixel)),\n"
@@ -30,6 +31,11 @@ STAGE_GUARD = ("        guard let panel, panel.width.isFinite, panel.height.isFi
                "else { return own }\n")
 STAGE_SCALE = "        let s = scale.flatMap { $0.isFinite && $0 > 0 ? $0 : nil } ?? 1\n"
 MUTANTS = [
+    # A device's own desktop held to its panel's pixels.
+    ("P1 the panel never held to (the bug: 3704×2588 for a 2388×1668 panel)", PANEL, "        return scale\n"),
+    ("P2 the wide side only", PANEL, "        return min(scale, p.width / display.width)\n"),
+    ("P3 the tall side only", PANEL, "        return min(scale, p.height / display.height)\n"),
+    ("P4 the panel raising the knob", PANEL, "        return min(p.width / display.width, p.height / display.height)\n"),
     # The capture's pixel scale.
     ("C1 the knob never held to the display (the bug: a window on a 1x display in the top-left quarter)", HOLD,
      "        return knob\n"),

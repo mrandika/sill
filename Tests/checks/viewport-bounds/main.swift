@@ -132,6 +132,22 @@ for bad: Double in [0, -1, .nan, .infinity, -.infinity] {
     check(B.held(vp(1117, 642, bad)) == vp(1117, 642, nil), "a scale of \(bad) goes as none: the Mac window left alone")
 }
 
+// The device's screen scale (pixels per point): additive, taken in 1 to 4, ignored (never refused) outside it.
+let withPixels = Viewport(width: 1194, height: 834, scale: 0.65, fps: 60, deviceDesktop: true, pixelScale: 2)
+check(decoded(String(decoding: try! JSONEncoder().encode(withPixels), as: UTF8.self)) == withPixels && B.refusal(withPixels) == nil
+      && B.held(withPixels) == withPixels, "a screen scale of 2 is sent, decoded, taken and kept")
+check(B.panelPixels(withPixels) == CGSize(width: 2388, height: 1668), "an iPad Pro 11\"'s panel is 2388×1668 pixels")
+let roomy = Viewport(width: 1388, height: 970, scale: 0.75, pixelScale: 1.72)
+check(B.refusal(roomy) == nil && B.held(roomy) == roomy && B.panelPixels(roomy).map { abs($0.width - 2387.36) < 0.01 } == true,
+      "a physical 1.72 pixels a point (an iPad in a layout with more room) is taken as it is")
+check(B.panelPixels(vp(1194, 834, 0.65)) == nil, "no screen scale (a device from before): no panel in pixels")
+for bad: Double in [0, 0.5, 5, 100, -2, .nan, .infinity] {
+    let v = Viewport(width: 1194, height: 834, scale: 1, pixelScale: bad)
+    check(B.panelPixels(v) == nil && B.refusal(v) == nil && B.held(v)?.pixelScale == nil,
+          "a screen scale of \(bad) is ignored: the viewport is taken, the panel in pixels is none, and a device sends none")
+}
+check(decoded(#"{"width":1194,"height":834,"scale":1}"#).map { $0.pixelScale == nil } == true, "a viewport from a device before it has none")
+
 // MARK: - The numbers in the host's lines
 
 check(B.whole(1512.7) == "1512" && B.whole(-3.9) == "-3" && B.whole(0.0) == "0" && B.whole(-0.0) == "0", "whole: toward zero, as Int() printed it")
