@@ -405,6 +405,9 @@ final class InputOverlayView: UIView, UITextInput, UIGestureRecognizerDelegate {
     /// it is the picture's, its pinch, in this view's points (StreamZoom.Stroke). Before there is a
     /// picture the stroke is judged as ever but nothing zooms.
     private func zoomTouch(_ touch: StrokeObserver.Touch) {
+        // With Pinch Zooms the Mac's App on, two fingers are the Mac's pinch (`handlePinch`), never the
+        // picture's: the stroke is not judged and the picture stays as it is.
+        guard !Self.pinchZoomsMac else { return }
         var z = zoom
         var changed = false
         switch touch {
@@ -558,6 +561,9 @@ final class InputOverlayView: UIView, UITextInput, UIGestureRecognizerDelegate {
         lastPinchLocation = location
         switch gesture.state {
         case .began:
+            // Fingers on the glass are the picture's pinch unless the Mac's is chosen (StreamZoom); a
+            // trackpad's pinch has no touches and is always the Mac's.
+            if gesture.numberOfTouches > 0, !Self.pinchZoomsMac { return }
             guard magnifyAvailable(), let p = normalized(location, clamped: true) else { return }
             // The scroll the two fingers may be making goes on (`endScrollForPinch`).
             endScrollForPinch(at: location)
@@ -1277,6 +1283,11 @@ final class InputOverlayView: UIView, UITextInput, UIGestureRecognizerDelegate {
     /// off unless turned on, read at each stroke, never sent. Needs the Mac to take gestures.
     static let trackpadControlSwipeKey = "Sill.trackpadControlSwipe"
     static var trackpadControlSwipe: Bool { UserDefaults.standard.bool(forKey: trackpadControlSwipeKey) }
+    /// Pinch Zooms the Mac's App (Settings › This iPad): two fingers pinching the picture are sent to the
+    /// Mac as its own pinch (`.magnify`) instead of zooming the picture (StreamZoom). Off unless turned on,
+    /// read at each touch, never sent. The iPad's trackpad pinch (no touches) always goes to the Mac.
+    static let pinchZoomsMacKey = "Sill.pinchZoomsMac"
+    static var pinchZoomsMac: Bool { UserDefaults.standard.bool(forKey: pinchZoomsMacKey) }
     static let reverseTrackpadScrollKey = "Sill.reverseTrackpadScroll"
     static var reverseTrackpadScroll: Bool { UserDefaults.standard.bool(forKey: reverseTrackpadScrollKey) }
     static let leftOptionAsCommandKey = "Sill.leftOptionAsCommand"

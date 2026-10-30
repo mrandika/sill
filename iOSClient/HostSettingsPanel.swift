@@ -52,6 +52,9 @@ struct HostSettingsPanel: View {
     /// This device's switch for Control + a two-finger trackpad stroke as the four swipes: off unless
     /// turned on, read by the input view at each stroke, never sent.
     @AppStorage(InputOverlayView.trackpadControlSwipeKey) private var trackpadControlSwipe = false
+    /// This device's switch for sending a two-finger pinch to the Mac instead of zooming the picture:
+    /// off unless turned on, read by the input view at each touch, never sent.
+    @AppStorage(InputOverlayView.pinchZoomsMacKey) private var pinchZoomsMac = false
     /// This device's switch for Larger Picture (docs/larger-picture-plan.md): off unless turned on,
     /// read by the stream screen, never sent.
     @AppStorage(StreamClient.largerPictureKey) private var largerPicture = false
@@ -661,6 +664,18 @@ struct HostSettingsPanel: View {
                      + "swiping two fingers on the trackpad does the same on \(mac): left or right switches Spaces, "
                      + "up opens Mission Control, down App Exposé. The stroke is not scrolled. It follows the "
                      + "Reverse Trackpad Scrolling setting below.")
+        }
+        // Only for a Mac that takes the pinch (`WindowList.magnify`): for any other the switch would do nothing.
+        if client.hostMagnify != nil {
+            Rows {
+                Toggle(isOn: $pinchZoomsMac) {
+                    Text("Pinch Zooms \(mac)’s App").foregroundStyle(Palette.text)
+                }
+                .rowFrame()
+            }
+            Footnote(text: "Off, pinching two fingers on the picture zooms the picture here and sends nothing to \(mac). "
+                     + "On, the pinch goes to \(mac) as its own, so an app that zooms (Maps, Photos, Safari) zooms "
+                     + "itself, and the picture is not zoomed. The \(device)’s trackpad pinch always goes to \(mac).")
         }
         Rows {
             Toggle(isOn: $leftOptionAsCommand) {
