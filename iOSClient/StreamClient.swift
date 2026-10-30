@@ -3501,10 +3501,7 @@ final class StreamClient: ObservableObject {
         hostVersion = nil
         hostProtocol = nil
         hostGestures = nil
-<<<<<<< Updated upstream
-=======
         hostMagnify = nil
->>>>>>> Stashed changes
         hostFileDrop = false
         stopMicrophoneCapture(sendStop: false)
         hostMicrophone = nil
@@ -4064,10 +4061,7 @@ final class StreamClient: ObservableObject {
                 if self.hostVersion != list.hostVersion { self.hostVersion = list.hostVersion }
                 if self.hostProtocol != list.protocol { self.hostProtocol = list.protocol }
                 if self.hostGestures != list.gestures { self.hostGestures = list.gestures }
-<<<<<<< Updated upstream
-=======
                 if self.hostMagnify != list.magnify { self.hostMagnify = list.magnify }
->>>>>>> Stashed changes
                 if self.hostFileDrop != (list.fileDrop == true) { self.hostFileDrop = (list.fileDrop == true) }
                 if self.hostMicrophone != list.microphone {
                     self.hostMicrophone = list.microphone

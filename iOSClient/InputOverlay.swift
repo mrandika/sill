@@ -1273,13 +1273,10 @@ final class InputOverlayView: UIView, UITextInput, UIGestureRecognizerDelegate {
     /// Reverse Trackpad Scrolling (Settings › This iPad): turns round the direction a trackpad's or a
     /// wheel's scroll arrives in, which is the iPad's own. Off unless turned on, read at each event,
     /// never sent.
-<<<<<<< Updated upstream
-=======
     /// Control + a two-finger trackpad stroke as the four swipes (Spaces, Mission Control, App Exposé):
     /// off unless turned on, read at each stroke, never sent. Needs the Mac to take gestures.
     static let trackpadControlSwipeKey = "Sill.trackpadControlSwipe"
     static var trackpadControlSwipe: Bool { UserDefaults.standard.bool(forKey: trackpadControlSwipeKey) }
->>>>>>> Stashed changes
     static let reverseTrackpadScrollKey = "Sill.reverseTrackpadScroll"
     static var reverseTrackpadScroll: Bool { UserDefaults.standard.bool(forKey: reverseTrackpadScrollKey) }
     static let leftOptionAsCommandKey = "Sill.leftOptionAsCommand"

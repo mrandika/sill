@@ -4,7 +4,6 @@
 <dict>
 	<key>CADisableMinimumFrameDurationOnPhone</key>
 	<true/>
-<<<<<<< Updated upstream
 	<!-- Export compliance: Sill uses no encryption but Apple's own, so uploads, TestFlight builds
 	     included, skip the encryption questions. Look again before adding cipher code or a crypto
 	     library of Sill's own (docs/app-store-metadata.md section 6). -->
@@ -28,8 +27,6 @@
 	<string>Streams your microphone to your Mac when Share Microphone is turned on.</string>
 	<!-- sill://pair links from the Camera or Messages. Never acted on without a confirmation, since
 	     another app could claim the scheme too; the in-app scanner is the main path. -->
-=======
->>>>>>> Stashed changes
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>

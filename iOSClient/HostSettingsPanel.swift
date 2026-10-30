@@ -650,8 +650,6 @@ struct HostSettingsPanel: View {
             }
         }
         Footnote(text: gesturesFooter)
-<<<<<<< Updated upstream
-=======
         if gesturesOn, device == "iPad" {
             Rows {
                 Toggle(isOn: $trackpadControlSwipe) {
@@ -664,7 +662,6 @@ struct HostSettingsPanel: View {
                      + "up opens Mission Control, down App Exposé. The stroke is not scrolled. It follows the "
                      + "Reverse Trackpad Scrolling setting below.")
         }
->>>>>>> Stashed changes
         Rows {
             Toggle(isOn: $leftOptionAsCommand) {
                 Text("Left Option Key as Command").foregroundStyle(Palette.text)

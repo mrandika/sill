@@ -2849,10 +2849,7 @@ package final class StreamCoordinator {
         var list = WindowList(macName: macName, windows: catalog.infos, active: active, launchID: launchID,
                               hostVersion: hostVersion, protocol: SillProtocol.current,
                               gestures: TrackpadGesture.generation, clipboard: clipboard.advertised)
-<<<<<<< Updated upstream
-=======
         list.magnify = Magnify.generation
->>>>>>> Stashed changes
         list.fileDrop = synthetic ? nil : true
         list.microphone = synthetic ? nil : MicrophoneCodec.generation
         list.camera = synthetic ? nil : CameraCodec.generation
