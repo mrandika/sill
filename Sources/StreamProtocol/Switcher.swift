@@ -72,6 +72,14 @@ public struct WindowList: Codable {
     /// What this host takes of the device's camera (kind 46, CameraMessage): 1 is JPEG / HEVC frames.
     /// Nil from hosts before camera support or synthetic test hosts.
     public var camera: Int?
+    /// Whether this host repeats a device's key held down (KeyRepeat, #162): 1 is a key repeated between
+    /// its down and its up, after the Mac's own Delay Until Repeat and at its Key Repeat Rate, each repeat
+    /// the key's down again with the autorepeat flag. Nil from every host before 2026-10-29: a device then
+    /// types a hardware keyboard's characters through iPadOS's text system, as it always did (iPadOS
+    /// repeats Delete and Space itself; sent as keys, a Mac that repeats none would type each once), and
+    /// sends them as keys only to a host that says so (the device's KeyTyping). Set after the initializer,
+    /// whose parameters stay as they were: `list.keyRepeat = KeyRepeat.generation`.
+    public var keyRepeat: Int?
 
     public init(macName: String, windows: [WindowInfo], active: StreamSource, launchID: String? = nil,
                 hostVersion: String? = nil, protocol: Int? = nil, gestures: Int? = nil, clipboard: Int? = nil) {

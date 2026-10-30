@@ -137,7 +137,7 @@ final class HostSettings {
             Key.internetAccess: base.internetAccess,
             Key.remoteAddressName: "",
             Key.updateCheck: true,
-            // On, like the CLI: each device has its own switch, and a password manager's copies never go.
+            // On, like the CLI: each device has its own switch.
             Key.shareClipboard: base.shareClipboard,
             Key.mirrorOtherDisplays: false,
             Key.deviceOnlySound: false,
