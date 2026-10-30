@@ -52,8 +52,8 @@ struct HostSettingsPanel: View {
     /// This device's switch for Control + a two-finger trackpad stroke as the four swipes: off unless
     /// turned on, read by the input view at each stroke, never sent.
     @AppStorage(InputOverlayView.trackpadControlSwipeKey) private var trackpadControlSwipe = false
-    /// This device's switch for sending a two-finger pinch to the Mac instead of zooming the picture:
-    /// off unless turned on, read by the input view at each touch, never sent.
+    /// This device's choice of what a two-finger pinch on the picture does, Zoom Stream (false, the
+    /// picture) or Zoom App (true, the Mac's own pinch): Zoom Stream unless chosen, read by the input view at each touch, never sent.
     @AppStorage(InputOverlayView.pinchZoomsMacKey) private var pinchZoomsMac = false
     /// This device's switch for Larger Picture (docs/larger-picture-plan.md): off unless turned on,
     /// read by the stream screen, never sent.
@@ -665,17 +665,22 @@ struct HostSettingsPanel: View {
                      + "up opens Mission Control, down App Exposé. The stroke is not scrolled. It follows the "
                      + "Reverse Trackpad Scrolling setting below.")
         }
-        // Only for a Mac that takes the pinch (`WindowList.magnify`): for any other the switch would do nothing.
+        // Only for a Mac that takes the pinch (`WindowList.magnify`): for any other Zoom App would do nothing.
         if client.hostMagnify != nil {
             Rows {
-                Toggle(isOn: $pinchZoomsMac) {
-                    Text("Pinch Zooms \(mac)’s App").foregroundStyle(Palette.text)
+                AdaptiveRow(title: "Pinch Behavior", since: nil) {
+                    Picker("Pinch Behavior", selection: $pinchZoomsMac) {
+                        Text("Zoom Stream").tag(false)
+                        Text("Zoom App").tag(true)
+                    }
+                    .pickerStyle(.segmented)
+                    .fixedSize()
                 }
-                .rowFrame()
             }
-            Footnote(text: "Off, pinching two fingers on the picture zooms the picture here and sends nothing to \(mac). "
-                     + "On, the pinch goes to \(mac) as its own, so an app that zooms (Maps, Photos, Safari) zooms "
-                     + "itself, and the picture is not zoomed. The \(device)’s trackpad pinch always goes to \(mac).")
+            Footnote(text: "What two fingers pinching the picture do. Zoom Stream magnifies the picture on this \(device) "
+                     + "and sends nothing to \(mac). Zoom App sends the pinch to \(mac) as a trackpad pinch, so an app "
+                     + "that zooms (Maps, Photos, Safari, Preview) zooms its own content and the picture keeps its "
+                     + "size. The \(device)’s trackpad pinch always zooms the app.")
         }
         Rows {
             Toggle(isOn: $leftOptionAsCommand) {

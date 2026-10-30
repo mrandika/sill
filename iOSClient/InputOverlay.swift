@@ -1283,7 +1283,7 @@ final class InputOverlayView: UIView, UITextInput, UIGestureRecognizerDelegate {
     /// off unless turned on, read at each stroke, never sent. Needs the Mac to take gestures.
     static let trackpadControlSwipeKey = "Sill.trackpadControlSwipe"
     static var trackpadControlSwipe: Bool { UserDefaults.standard.bool(forKey: trackpadControlSwipeKey) }
-    /// Pinch Zooms the Mac's App (Settings › This iPad): two fingers pinching the picture are sent to the
+    /// Pinch Behavior, Zoom App (Settings › This iPad): two fingers pinching the picture are sent to the
     /// Mac as its own pinch (`.magnify`) instead of zooming the picture (StreamZoom). Off unless turned on,
     /// read at each touch, never sent. The iPad's trackpad pinch (no touches) always goes to the Mac.
     static let pinchZoomsMacKey = "Sill.pinchZoomsMac"
