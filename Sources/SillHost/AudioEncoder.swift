@@ -29,7 +29,7 @@ final class AudioEncoder {
 
     static let sampleRate = 48_000.0
     static let channels = 2
-    static let bitrate = 128_000
+    static let bitrate = 256_000
 
     /// The frames each packet decodes to (the converter's own figure, read back).
     let framesPerPacket: Int

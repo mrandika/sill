@@ -514,7 +514,7 @@ streamed window's app (every window of it: macOS captures sound per app), or
 every app but Sill for the Desktop. The Mac keeps playing it too. It comes
 from a second, audio-only ScreenCaptureKit stream, so rotating, Aa, a quality
 change or the encoder's fallback never interrupt it, and it needs no
-permission beyond Screen Recording. AAC-ELD at 128 kbps, 10 ms packets, as
+permission beyond Screen Recording. AAC-ELD at 256 kbps, 10 ms packets, as
 kind 43 on the session's own connection, only to a device whose hello lists
 the codec (a device from before 2026-09-27 is sent none); away from home the
 sound's bytes count in remote pacing's backlog, which drops frames and never

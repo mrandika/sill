@@ -9,7 +9,7 @@ import Foundation
 // time of the frame it decodes to first): each click must land at its whole second ±2 frames, a
 // segment's first packet starting clean after a gap and the encoder's reset included. Then the
 // packet size, the priming and the cookie read back, one packet per block from the first, a late
-// join's first packet, and 5 s of a busy signal at 120–140 kbps.
+// join's first packet, and 5 s of a busy signal at 240–280 kbps.
 var failures = 0
 var checks = 0
 func check(_ ok: Bool, _ what: @autoclosure () -> String, line: Int = #line) {
@@ -160,7 +160,7 @@ do {
     check(errs[3] < -100, "…and its fourth exact (\(Int(errs[3])) dB): the device drops the first and fades in the next")
 }
 
-// MARK: - The busy signal's rate: 5 s at 120–140 kbps
+// MARK: - The busy signal's rate: 5 s at 240–280 kbps
 
 do {
     let enc = try! AudioEncoder(framesPerPacket: 480)
@@ -185,13 +185,13 @@ do {
         if let p = enc.encode(block) { bytes += p.count; packets += 1 }
     }
     let kbps = Double(bytes * 8) / 5 / 1000
-    check(packets == 500 && (120...140).contains(kbps), "5 s of a busy signal: \(packets) packets, \(String(format: "%.1f", kbps)) kbps")
-    check(enc.bitrate == 128_000, "the encoder reads back 128 kbps (\(enc.bitrate))")
+    check(packets == 500 && (240...280).contains(kbps), "5 s of a busy signal: \(packets) packets, \(String(format: "%.1f", kbps)) kbps")
+    check(enc.bitrate == 256_000, "the encoder reads back 256 kbps (\(enc.bitrate))")
 }
 
 // MARK: - What the encoder and decoder refuse
 
-check(AudioEncoder.sampleRate == 48_000 && AudioEncoder.channels == 2 && AudioEncoder.bitrate == 128_000, "48 kHz stereo at 128 kbps")
+check(AudioEncoder.sampleRate == 48_000 && AudioEncoder.channels == 2 && AudioEncoder.bitrate == 256_000, "48 kHz stereo at 256 kbps")
 check((try? AudioEncoder(framesPerPacket: 480))?.encode([Float](repeating: 0, count: 959)) == nil, "a block of the wrong size makes no packet")
 check((try? AudioDecoder(framesPerPacket: 0, cookie: Data())) == nil, "a decoder for 0-frame packets is refused")
 check(AudioDecoder.codecs == ["aac-eld"], "the decoder plays aac-eld")

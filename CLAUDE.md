@@ -1742,7 +1742,7 @@ fixed (5126215 to 8bbbe52, below) and verified in the simulator
     synthetic host never captures a real window's sound.
   - The packetizer makes blocks stamped at input frame n·F − P from each
     chunk's anchor. A gap ends a segment, with nothing flushed or filled.
-  - The encoder is AAC-ELD at 128 kbps, AudioToolbox only.
+  - The encoder is AAC-ELD at 256 kbps (128 until 2026-11-03), AudioToolbox only.
   - StreamServer keeps each device's codec from its hello and sends the
     epoch's format before the epoch's first packet. The sound has a send path
     of its own: never `inflight`, the drain eviction or the keyframes'

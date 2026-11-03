@@ -20,7 +20,7 @@ import Foundation
 /// The codecs by name, as the hello and the format carry them, and the host's pick.
 public enum AudioCodec {
     /// AAC-ELD (AudioToolbox's kAudioFormatMPEG4AAC_ELD): 48 kHz stereo, 480 or 512 frames a packet
-    /// (10 or 10.7 ms), 128 kbps. The only codec in this step.
+    /// (10 or 10.7 ms), 256 kbps. The only codec in this step.
     public static let aacELD = "aac-eld"
     /// What this host makes, best first.
     public static let hostMakes = [aacELD]
@@ -52,7 +52,7 @@ public struct AudioFormat: Codable, Hashable, Sendable {
     /// 240 or 256: the decoded frames a new segment starts with that are the codec's own, before its
     /// first captured frame (the device drops them).
     public var primingFrames: Int?
-    /// The encoder's target in bits per second, 128000 (display only).
+    /// The encoder's target in bits per second, 256000 (display only).
     public var bitrate: Int?
     /// The epoch of the packets this format belongs to (`AudioPackets.epoch`: 0 to 65535, wrapping).
     public var epoch: Int?
@@ -95,7 +95,7 @@ public struct AudioPackets: Hashable, Sendable {
     public var seq: UInt32
     /// Flags bit 0.
     public var segmentStart: Bool
-    /// 1 to 255 packets of at most 65,535 bytes each (this host sends one of about 170 bytes).
+    /// 1 to 255 packets of at most 65,535 bytes each (this host sends one of about 340 bytes).
     public var packets: [Data]
 
     /// The most packets one message carries.
@@ -136,7 +136,7 @@ public enum AudioMessage: Hashable, Sendable {
     public static let typeFormat: UInt8 = 1
     public static let typePackets: UInt8 = 2
     /// The largest payload of each type a reader takes (a format is under 1 KB; a packets message at
-    /// 128 kbps is under 1 KB too), far under the 4 MB every host message may have. Part of the
+    /// 256 kbps is under 1 KB too), far under the 4 MB every host message may have. Part of the
     /// compatibility floor once a public build reads kind 43 (CLAUDE.md): a device drops a message past
     /// them whole, so a later host keeps within them, one that batches packets included.
     public static let maxFormatPayload = 4096
