@@ -5,7 +5,7 @@
 //   - mayType: asked again after the check, true only for a locked screen and a paired session.
 //   - phaseAfterUnlock: an unlocked screen forgets the typing, a locked one keeps it.
 //   - What may be kept: not empty, at most 256 characters (counted as characters, not bytes), no control
-//     character; what is typed: the text, then Return down and up, nothing for an invalid password.
+//     character; what is typed: the field cleared (⌘A, Delete), the text, then Return down and up, nothing for an invalid password.
 //   - Every word, and the method names.
 //   swiftc -O iOSClient/UnlockPolicy.swift Tests/checks/unlock-policy/main.swift -o .build/checks/unlock-policy/check && .build/checks/unlock-policy/check
 import Foundation
@@ -22,6 +22,7 @@ func check(_ ok: Bool, _ what: @autoclosure () -> String, line: Int = #line) {
 check(U.maxLength == 256, "max length")
 check(U.retryAfter == 5, "retry after 5 s")
 check(U.returnUsage == 40, "Return is HID usage 40")
+check(U.aUsage == 4 && U.deleteUsage == 42, "A is 4, Delete is 42")
 
 // The offer, over every combination against an oracle.
 let phases: [U.Phase] = [.idle, .typed(at: 100)]
@@ -81,7 +82,9 @@ check(U.isValid("\u{20}x"), "0x20 is allowed")
 // What is typed.
 check(U.steps(for: "") == [], "nothing for an empty password")
 check(U.steps(for: "a\nb") == [], "nothing for a line break")
-check(U.steps(for: "hunter2") == [.text("hunter2"), .key(hidUsage: 40, down: true), .key(hidUsage: 40, down: false)], "text, Return down, Return up")
+check(U.steps(for: "hunter2") == [.selectAll, .key(hidUsage: 42, down: true), .key(hidUsage: 42, down: false), .text("hunter2"),
+                                    .key(hidUsage: 40, down: true), .key(hidUsage: 40, down: false)], "clear the field, then text, Return down, Return up")
+check(U.steps(for: "hunter2").first == .selectAll, "the field is cleared before anything is typed")
 check(U.steps(for: String(repeating: "x", count: 257)) == [], "nothing for too long")
 
 // The methods and the words.

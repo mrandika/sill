@@ -143,6 +143,8 @@ final class UnlockModel: ObservableObject {
                                            sessionPaired: client.settings.host?.sessionPaired) else { return }
                 for step in UnlockPolicy.steps(for: password) {
                     switch step {
+                    case .selectAll:
+                        for event in KeyChord.press(UnlockPolicy.aUsage, with: .command) { client.sendInput(event) }
                     case .text(let text): client.sendInput(.text(text))
                     case .key(let usage, let down): client.sendInput(.key(hidUsage: usage, down: down, modifiers: 0))
                     }

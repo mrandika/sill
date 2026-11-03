@@ -56,18 +56,26 @@ enum UnlockPolicy {
 
     /// One piece of what is sent, in order.
     enum Step: Equatable {
+        /// ⌘A in the password field: selects whatever an earlier try left in it.
+        case selectAll
         case text(String)
         case key(hidUsage: UInt16, down: Bool)
     }
 
-    /// HID usage of the Return key (keyboard page, 0x28).
+    /// HID usages (keyboard page): A, Backspace (the Delete key) and Return.
+    static let aUsage: UInt16 = 4
+    static let deleteUsage: UInt16 = 42
     static let returnUsage: UInt16 = 40
 
-    /// What goes to the Mac: the password as text, then Return down and up. Nothing for a password that
-    /// is not valid.
+    /// What goes to the Mac: the field cleared first (⌘A, then Delete, so a wrong try's leftovers or a
+    /// half-typed password never join the new one), then the password as text, then Return down and up.
+    /// Nothing for a password that is not valid.
     static func steps(for password: String) -> [Step] {
         guard isValid(password) else { return [] }
-        return [.text(password), .key(hidUsage: returnUsage, down: true), .key(hidUsage: returnUsage, down: false)]
+        return [.selectAll,
+                .key(hidUsage: deleteUsage, down: true), .key(hidUsage: deleteUsage, down: false),
+                .text(password),
+                .key(hidUsage: returnUsage, down: true), .key(hidUsage: returnUsage, down: false)]
     }
 
     /// The check this device offers, for the words.
