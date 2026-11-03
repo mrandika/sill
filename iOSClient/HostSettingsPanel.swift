@@ -657,6 +657,14 @@ struct HostSettingsPanel: View {
                 Footnote(text: note.text, warning: note.warning, top: 6)
             }
         }
+        // Unlocking this Mac with Face ID or Touch ID (docs/unlock-biometric-plan.md): for a saved Mac,
+        // on a session the Mac says is paired.
+        if let macID = client.session?.macID, client.settings.host?.sessionPaired == true {
+            Rows {
+                UnlockPasswordRow(client: client, macID: macID, mac: mac)
+            }
+            Footnote(text: UnlockPolicy.Copy.footnote(mac: mac, method: UnlockPasswordStore.method()))
+        }
         if (client.hostMicrophone ?? 0) >= MicrophoneCodec.generation {
             Rows {
                 Toggle(isOn: $microphoneOn) {

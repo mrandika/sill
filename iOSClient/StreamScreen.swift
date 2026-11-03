@@ -123,6 +123,9 @@ struct StreamScreen: View {
     /// The Settings panel (the Mac's streaming settings) is open. Up here, next to the drawer, so a
     /// rotation keeps it open and it re-anchors in the other layout.
     @State private var settingsOpen = false
+    /// The unlock chip's memory at a locked Mac (docs/unlock-biometric-plan.md); held here so hiding the
+    /// chip under the panel or the drawer forgets nothing.
+    @StateObject private var unlockModel = UnlockModel()
     /// The keyboard was up (the overlay first responder) when the panel opened: closing the panel
     /// puts it back.
     @State private var keyboardBeforeSettings = false
@@ -302,6 +305,18 @@ struct StreamScreen: View {
                                alignment: corner == .topTrailing ? .topTrailing : .bottomTrailing)
                         .position(x: panel.midX, y: panel.midY)
                         .transition(.opacity)
+                }
+                // The unlock chip at a locked Mac (docs/unlock-biometric-plan.md): where the clipboard's
+                // goes, which is never offered while the Mac is locked. It draws nothing unless a password
+                // is kept for this Mac and the session is paired.
+                if clipboardChipAllowed, let panel = tourTargets[.stream] {
+                    let corner = ClipboardPolicy.chipCorner(landscape: layout == .landscape, linkLineShown: shownLinkLine != nil)
+                    UnlockChip(client: client, model: unlockModel)
+                        .frame(maxWidth: max(0, panel.width - 16), alignment: .trailing)
+                        .padding(8)
+                        .frame(width: panel.width, height: panel.height,
+                               alignment: corner == .topTrailing ? .topTrailing : .bottomTrailing)
+                        .position(x: panel.midX, y: panel.midY)
                 }
                 // The tour: a sibling above the layouts, as the pairing overlay is, and under it: an
                 // outside link puts the tour aside until the overlay has closed.
