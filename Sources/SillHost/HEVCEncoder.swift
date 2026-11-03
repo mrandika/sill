@@ -91,6 +91,9 @@ final class HEVCEncoder {
     /// Most recent captured frame. ScreenCaptureKit only delivers frames when the window repaints,
     /// so a client that connects while the window is static would otherwise never get a keyframe.
     private var lastFrame: CVPixelBuffer?
+    /// The last picture that went into this session (a still window's last frame): what a fade to black
+    /// starts from when the Desktop gives way to the placeholder.
+    var lastPicture: CVPixelBuffer? { lock.lock(); defer { lock.unlock() }; return lastFrame }
     private var lastFrameAt: CFTimeInterval = 0
     /// The watchdog gave up on this session (not `abandon`): its deinit says whether the frame came back.
     private var hungReported = false

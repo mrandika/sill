@@ -2,6 +2,7 @@ import Foundation
 import CoreVideo
 import CoreMedia
 import CoreGraphics
+import CoreImage
 import ImageIO
 
 /// `SillHost --synthetic`: a moving test pattern stands in for ScreenCaptureKit, so the encoder,
@@ -122,22 +123,90 @@ final class SyntheticCapture: @unchecked Sendable {   // state is confined to `q
 /// device's too; a device that connects later gets it from the encoder's keyframe request, which encodes
 /// the last frame again. `onFrame` is set by the main actor while stopped; the rest lives on `queue`.
 final class StillCapture: @unchecked Sendable {
+    /// A fade from the last picture to black: this many frames over `fadeSeconds`, eased.
+    static let fadeFrames = 12
+    static let fadeSeconds = 0.45
+    /// The picture that follows fades in from black, this many frames over `fadeInSeconds`.
+    static let fadeInFrames = 8
+    static let fadeInSeconds = 0.3
+    private static let ciContext = CIContext(options: [.cacheIntermediates: false])
+
     var onFrame: ((CVPixelBuffer, CMTime) -> Void)?
     private let queue = DispatchQueue(label: "sill.still", qos: .userInitiated)
     /// Bumped by each start and stop, so a late second delivery of an older one does nothing.
     private var generation = 0
 
-    func start(width: Int, height: Int) {
+    /// The placeholder: black, or `info`'s picture (the Mac's icon and a few words), delivered twice. With
+    /// `fadeFrom` (the last picture of the stream it replaces) the picture before fades out to black, and
+    /// `info`'s fades in. `info` is asked for when the fade out ends (the Mac's lock reading is then
+    /// settled) and answers nil for plain black.
+    func start(width: Int, height: Int, fadeFrom: CVPixelBuffer? = nil, info: (@Sendable () -> CVPixelBuffer?)? = nil) {
         queue.async { [self] in
             generation += 1
             let mine = generation
-            guard let frame = Self.black(width: width, height: height) else {
+            guard let black = Self.black(width: width, height: height) else {
                 print("Placeholder: could not make a \(width)×\(height) frame")
                 return
             }
-            deliver(frame)
-            queue.asyncAfter(deadline: .now() + 0.5) { [self] in if generation == mine { deliver(frame) } }
+            var fadeOutEnds = 0.0
+            if let fadeFrom {
+                let n = Self.fadeFrames
+                for i in 0..<n {
+                    let t = Double(i) / Double(n)
+                    let alpha = CGFloat(1 - t * t * (3 - 2 * t))    // smoothstep: 1 down to just above 0
+                    queue.asyncAfter(deadline: .now() + Self.fadeSeconds * t) { [self] in
+                        guard generation == mine, let step = Self.faded(fadeFrom, alpha: alpha, width: width, height: height) else { return }
+                        deliver(step)
+                    }
+                }
+                fadeOutEnds = Self.fadeSeconds
+            }
+            queue.asyncAfter(deadline: .now() + fadeOutEnds) { [self] in
+                guard generation == mine else { return }
+                let shown = info?() ?? black
+                if fadeFrom != nil, shown !== black {
+                    // Black first, then the picture in.
+                    deliver(black)
+                    let n = Self.fadeInFrames
+                    for i in 1...n {
+                        let t = Double(i) / Double(n)
+                        queue.asyncAfter(deadline: .now() + Self.fadeInSeconds * t) { [self] in
+                            guard generation == mine else { return }
+                            if i == n { deliver(shown); return }
+                            if let step = Self.faded(shown, alpha: CGFloat(t * t * (3 - 2 * t)), width: width, height: height) { deliver(step) }
+                        }
+                    }
+                    queue.asyncAfter(deadline: .now() + Self.fadeInSeconds + 0.5) { [self] in if generation == mine { deliver(shown) } }
+                } else {
+                    deliver(shown)
+                    queue.asyncAfter(deadline: .now() + 0.5) { [self] in if generation == mine { deliver(shown) } }
+                }
+            }
         }
+    }
+
+    /// `source` fitted into a `width`×`height` frame on black, at `alpha` of its brightness.
+    private static func faded(_ source: CVPixelBuffer, alpha: CGFloat, width: Int, height: Int) -> CVPixelBuffer? {
+        let attrs: [CFString: Any] = [kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary]
+        var out: CVPixelBuffer?
+        guard CVPixelBufferCreate(nil, width, height, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange, attrs as CFDictionary, &out) == kCVReturnSuccess,
+              let out else { return nil }
+        let sw = CGFloat(CVPixelBufferGetWidth(source)), sh = CGFloat(CVPixelBufferGetHeight(source))
+        guard sw > 0, sh > 0 else { return nil }
+        let scale = min(CGFloat(width) / sw, CGFloat(height) / sh)
+        let placed = CIImage(cvPixelBuffer: source)
+            .transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+            .transformed(by: CGAffineTransform(translationX: (CGFloat(width) - sw * scale) / 2, y: (CGFloat(height) - sh * scale) / 2))
+            .applyingFilter("CIColorMatrix", parameters: [
+                "inputRVector": CIVector(x: alpha, y: 0, z: 0, w: 0),
+                "inputGVector": CIVector(x: 0, y: alpha, z: 0, w: 0),
+                "inputBVector": CIVector(x: 0, y: 0, z: alpha, w: 0),
+                "inputAVector": CIVector(x: 0, y: 0, z: 0, w: 1),
+            ])
+        let canvas = CGRect(x: 0, y: 0, width: width, height: height)
+        let frame = placed.composited(over: CIImage(color: .black).cropped(to: canvas)).cropped(to: canvas)
+        ciContext.render(frame, to: out)
+        return out
     }
 
     /// Returns once nothing more is delivered, so no late frame reaches the next encoder.

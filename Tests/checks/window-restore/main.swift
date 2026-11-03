@@ -1040,10 +1040,6 @@ check(DWP.shouldDeclareActivity(isConnect: false, lastDeclaredAt: 10.0, now: 12.
       "input at 2.0 s declares activity")
 check(DWP.shouldDeclareActivity(isConnect: true, lastDeclaredAt: nil, now: 10.0, synthetic: true) == false,
       "synthetic host never declares user activity")
-check(DWP.holdsSleepAssertion(connectedDevices: 1, synthetic: false) == true
-      && DWP.holdsSleepAssertion(connectedDevices: 0, synthetic: false) == false
-      && DWP.holdsSleepAssertion(connectedDevices: 1, synthetic: true) == false,
-      "sleep assertion held only while connectedDevices > 0 and not synthetic")
 check(DWP.shouldRestartOnScreenWake(connectedDevices: 1, active: true, shuttingDown: false, synthetic: false) == true
       && DWP.shouldRestartOnScreenWake(connectedDevices: 0, active: true, shuttingDown: false, synthetic: false) == false
       && DWP.shouldRestartOnScreenWake(connectedDevices: 1, active: false, shuttingDown: false, synthetic: false) == false

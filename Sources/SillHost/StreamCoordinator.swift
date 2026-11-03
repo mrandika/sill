@@ -210,10 +210,11 @@ package final class StreamCoordinator {
     private var rectCache: (id: CGWindowID, rect: CGRect, at: CFAbsoluteTime)?
     private var pendingLaunch: String?
     private var switching = false
-    /// Display wake and display-sleep assertion while devices are connected (issue #134).
+    /// Display wake when a device connects (issue #134). No display-sleep assertion is held: the Mac
+    /// idles, sleeps its display and locks by its own settings, connected device or not.
     private var lastActivityDeclaredAt: Double?
-    private var displaySleepAssertion: IOPMAssertionID = 0
     private var screenWakeObserver: NSObjectProtocol?
+    private var screenSleepObserver: NSObjectProtocol?
     /// A restart of the active source is in flight (a settings change, a resize, a rate change,
     /// the encoder fallback, a lost display): the source being restarted. Nil during a switch to
     /// another source.
@@ -329,6 +330,8 @@ package final class StreamCoordinator {
     /// The Desktop streams the placeholder (a black still, no capture: StillCapture), not the display:
     /// what a locked Mac streams.
     private var placeholderStreams = false
+    /// The last picture of the stream just stopped, for the placeholder that follows it to fade from.
+    private var fadeFrame: CVPixelBuffer?
     /// The last window list built was a locked one (`listMessage`): an unlock `lockChanged` missed (its
     /// changes coalesced) still sends the devices the unlocked one.
     private var lockedListSent = false
@@ -645,7 +648,6 @@ package final class StreamCoordinator {
                 // SessionLock looks once a second while someone watches, and at once as the first comes.
                 SessionLock.shared.devices(count)
                 self.catalog.clientCount = count          // the catalog idles itself at 0
-                self.updateDisplaySleepAssertion(connectedDevices: count)
                 // Nobody is watching: stop capturing and encoding. The next client picks afresh.
                 if count == 0 { self.viewport = nil; self.clientFPS = [:]; self.fitScales = [:] }   // the next device starts from scratch
                 if count == 0 { self.gestureChords.forget() }                 // and did not open a view it could close
@@ -720,7 +722,17 @@ package final class StreamCoordinator {
             // 2026-11-01), and a device asks for the Desktop again the moment nothing streams: the lock is
             // read again first, so that pick meets the new reading (LockPolicy; the placeholder off console).
             SessionLock.shared.lookNow(cause: "the capture stopped")
-            Task { @MainActor in await self?.select(.none) }
+            Task { @MainActor in
+                guard let self else { return }
+                // The Desktop lost its display because the display went to sleep (the idle lock sleeps it
+                // first): the placeholder in one step. Passing through "nothing streams" would tell the
+                // device so (its Desktop button and Immersive's bar flash) and leave it the last picture.
+                if self.active == .desktop, self.catalog.clientCount > 0, !self.displayMayStream {
+                    await self.select(.desktop)
+                } else {
+                    await self.select(.none)
+                }
+            }
         }
         // Status for the menu bar app. The server's callbacks hop here from its network queue; the
         // stats tick runs on the main queue, which under the CLI's dispatchMain is drained by a
@@ -900,6 +912,20 @@ package final class StreamCoordinator {
                         synthetic: self.synthetic
                     ) else { return }
                     await self.select(self.active)
+                }
+            }
+        }
+        if !synthetic && screenSleepObserver == nil {
+            screenSleepObserver = NSWorkspace.shared.notificationCenter.addObserver(
+                forName: NSWorkspace.screensDidSleepNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                // The display went to sleep with the Desktop streaming: the placeholder, not the last picture.
+                Task { @MainActor [weak self] in
+                    guard let self, !self.shuttingDown, self.active == .desktop, !self.placeholderStreams,
+                          self.catalog.clientCount > 0, !self.switching, !self.displayMayStream else { return }
+                    await self.select(.desktop)
                 }
             }
         }
@@ -1521,6 +1547,16 @@ package final class StreamCoordinator {
     /// The gate's reading now (SessionLock's, set on its own queue).
     private var lockReading: LockPolicy.Reading { lockGate.reading }
 
+    /// Whether the Desktop's display streams at this reading (LockPolicy), and can: a Mac whose display is
+    /// asleep (the idle lock sleeps it first; the lock reading follows up to 0.2 s later) has nothing for
+    /// ScreenCaptureKit to capture ("Failed to find any displays or windows to capture"), so the device
+    /// would keep the last picture from before. The placeholder streams until the display wakes
+    /// (`screensDidWake`).
+    private var displayMayStream: Bool {
+        guard LockPolicy.allowed(lockReading).display else { return false }
+        return synthetic || CGDisplayIsAsleep(CGMainDisplayID()) == 0
+    }
+
     /// The gate changed (SessionLock.onChange, hopped here): what the devices are shown follows the reading
     /// as it is now, once per change however many came meanwhile. SessionLock printed its line already.
     /// Locked: the window list without windows, no thumbnail, icon or installed app, no menus' app, no
@@ -1571,7 +1607,7 @@ package final class StreamCoordinator {
         // a locked screen with `LockPolicy.lockScreenStreams`); else the Desktop again, so another user
         // taking the console turns the display into the placeholder, and this session back on it, locked,
         // turns the placeholder into the lock screen.
-        if active == .desktop, placeholderStreams != LockPolicy.allowed(lockReading).display { return }
+        if active == .desktop, placeholderStreams != displayMayStream { return }
         await select(.desktop)
     }
 
@@ -1616,6 +1652,8 @@ package final class StreamCoordinator {
         if let next = restore.afterUnlock(listed: catalog.infos.map(\.id), active: active, placeholder: placeholderStreams,
                                           devices: catalog.clientCount, reading: lockReading) {
             await select(next)
+        } else if active == .desktop, !placeholderStreams, wantedDeviceDesktop != nil, !deviceDesktop.isLive {
+            await select(.desktop)    // the lock screen streamed from the Mac's own display: the device's desktop again
         }
     }
 
@@ -1837,7 +1875,8 @@ package final class StreamCoordinator {
     /// The device desktop's size for the last viewport, or nil for the Mac's real screen: the
     /// device did not ask, or the display cannot be made here (no AppKit loop, a synthetic host).
     private var wantedDeviceDesktop: CGSize? {
-        guard appKitLoop, !synthetic, let v = viewport, v.deviceDesktop == true else { return nil }
+        // Never while locked: the lock screen is the Mac's own display's, not a display Sill made.
+        guard appKitLoop, !synthetic, !lockReading.locked, let v = viewport, v.deviceDesktop == true else { return nil }
         return DeviceDesktop.wantedSize(for: v)
     }
 
@@ -1951,6 +1990,9 @@ package final class StreamCoordinator {
         await stillCapture.stop()
         // Every queue drained: let the old encoder go.
         capture.onFrame = nil; syntheticCapture.onFrame = nil; stillCapture.onFrame = nil
+        // A picture of the Mac giving way to the placeholder fades out instead of cutting to black (not
+        // for another user's console, nor on a test host, whose placeholder is checked as plain black).
+        fadeFrame = (!synthetic && !placeholderStreams && lockReading != .offConsole) ? encoder?.lastPicture : nil
         placeholderStreams = false
         rectCache = nil
         // Input held for the old source must not replay into the new one, but what acts on the whole
@@ -2144,11 +2186,11 @@ package final class StreamCoordinator {
             // Staged on the virtual display, nothing is activated or raised on select: the window
             // cannot be covered there, and the AX moves that put it there touch no focus.
         case .desktop:
-            if !LockPolicy.allowed(lockReading).display {
+            if !displayMayStream {
                 // A locked Mac's Desktop (LockPolicy): the placeholder, a black still and no capture.
                 (width, height) = placeholderSize()
                 picture = .placeholder
-                describe = "a placeholder (this Mac is locked: nothing of it is captured)"
+                describe = "a placeholder (this Mac is locked or its display is asleep: nothing of it is captured)"
                 title = "Locked"; kind = .desktop
             } else if synthetic {
                 // A 1512×949-point test pattern: the same size as a typical streamed window, so the
@@ -2188,11 +2230,11 @@ package final class StreamCoordinator {
         // Locked while this switch was under way (the gate set during its awaits): no frame of a window
         // goes out (`lockedMidSwitch`), and the display gives way to the placeholder (LockPolicy).
         if case .window = source, lockReading.locked { lockedMidSwitch(source); return }
-        if picture == .display, !LockPolicy.allowed(lockReading).display {
+        if picture == .display, !displayMayStream {
             filter = nil; displayScale = nil
             (width, height) = placeholderSize()
             picture = .placeholder
-            describe = "a placeholder (this Mac is locked: nothing of it is captured)"
+            describe = "a placeholder (this Mac is locked or its display is asleep: nothing of it is captured)"
             title = "Locked"; kind = .desktop
         }
 
@@ -2303,13 +2345,13 @@ package final class StreamCoordinator {
             plan = (next.filter, next.displayID, next.displayScale, next.width, next.height)
         }
         // Locked during those awaits (LockPolicy): the placeholder, never the display.
-        let locked = !LockPolicy.allowed(lockReading).display
+        let locked = !displayMayStream
         if locked { plan = (nil, nil, nil, placeholderSize().width, placeholderSize().height) }
         print(CatalogLook.retryLine(source: describe, error: "\(error)", display: plan.displayID))
         do {
             try await startPipeline(source: .desktop, filter: plan.filter, sourceRect: nil, displayScale: plan.displayScale,
                                     width: plan.width, height: plan.height,
-                                    describe: locked ? "a placeholder (this Mac is locked: nothing of it is captured)" : describe,
+                                    describe: locked ? "a placeholder (this Mac is locked or its display is asleep: nothing of it is captured)" : describe,
                                     title: locked ? "Locked" : title, kind: kind, picture: locked ? .placeholder : .display)
         } catch {
             print("Could not start streaming \(describe): \(error)")
@@ -2357,8 +2399,20 @@ package final class StreamCoordinator {
         if picture == .placeholder {
             // A locked Mac: a black still, no ScreenCaptureKit, nothing of the Mac (StillCapture).
             stillCapture.onFrame = { pixelBuffer, pts in enc.encode(pixelBuffer, pts: pts) }
-            stillCapture.start(width: width, height: height)
+            var info: (@Sendable () -> CVPixelBuffer?)? = nil
+            if !synthetic {
+                let icon = PlaceholderInfo.IconBox(image: PlaceholderInfo.modelIcon())
+                let gate: LockGate = lockGate
+                let mac: String = macName
+                let w: Int = width, h: Int = height
+                info = { @Sendable () -> CVPixelBuffer? in
+                    PlaceholderInfo.frame(width: w, height: h, icon: icon.image, mac: mac, reading: gate.reading)
+                }
+            }
+            stillCapture.start(width: width, height: height, fadeFrom: fadeFrame, info: info)
+            fadeFrame = nil
         } else if let filter {
+            fadeFrame = nil
             capture.onFrame = { pixelBuffer, pts in enc.encode(pixelBuffer, pts: pts) }
             try await capture.start(filter: filter, width: width, height: height, fps: fps, showsCursor: false, sourceRect: sourceRect,
                                     scaleWords: CaptureScale.words(knob: captureScale, displayScale: displayScale))
@@ -3037,7 +3091,6 @@ package final class StreamCoordinator {
         injector.releaseAll()
         server.goodbyeAll(Goodbye(reason: Goodbye.quit), within: 0.1)
         shuttingDown = true
-        updateDisplaySleepAssertion(connectedDevices: 0)
         audio.shutdown()   // "Audio stopped: Sill is quitting."
         restoreFits(keeping: nil)
         stage.release()
@@ -3055,26 +3108,6 @@ package final class StreamCoordinator {
         lastActivityDeclaredAt = now
         var id: IOPMAssertionID = 0
         _ = IOPMAssertionDeclareUserActivity("Sill: device activity" as CFString, kIOPMUserActiveLocal, &id)
-    }
-
-    private func updateDisplaySleepAssertion(connectedDevices: Int) {
-        let shouldHold = DisplayWakePolicy.holdsSleepAssertion(connectedDevices: connectedDevices, synthetic: synthetic)
-        if shouldHold {
-            if displaySleepAssertion == 0 {
-                var id: IOPMAssertionID = 0
-                if IOPMAssertionCreateWithName(
-                    kIOPMAssertionTypePreventUserIdleDisplaySleep as CFString,
-                    IOPMAssertionLevel(kIOPMAssertionLevelOn),
-                    "Sill: a device is connected" as CFString,
-                    &id
-                ) == kIOReturnSuccess {
-                    displaySleepAssertion = id
-                }
-            }
-        } else if displaySleepAssertion != 0 {
-            IOPMAssertionRelease(displaySleepAssertion)
-            displaySleepAssertion = 0
-        }
     }
 
     /// The CLI's default path at a signal (HostShutdown.installKeyRelease), just before it dies of it:
