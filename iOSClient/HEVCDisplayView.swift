@@ -118,6 +118,13 @@ final class HEVCDisplayView: UIView {
     required init?(coder: NSCoder) { fatalError() }
     deinit { layerObservers.forEach(NotificationCenter.default.removeObserver) }
 
+    /// Whether the picture holds the device's display awake while it plays (AVSampleBufferDisplayLayer's
+    /// default on iOS, so a streaming device never auto-locks). Off while the Mac is locked or asleep, so
+    /// iPadOS's Auto-Lock counts down again; back on at the unlock. Main thread.
+    func setKeepsDeviceAwake(_ keeps: Bool) {
+        displayLayer.preventsDisplaySleepDuringVideoPlayback = keeps
+    }
+
     /// The layer says it could not decode a frame, or that it needs a flush before it decodes again
     /// (iOS says so when Sill goes to the background, or another app takes the decoder): looked at on
     /// `renderQueue` at once, since a still window sends no frame that would show it (`checkLayer`).

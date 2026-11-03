@@ -914,7 +914,11 @@ final class StreamClient: ObservableObject {
     /// windows then, it streams a black placeholder, and the Apps drawer and the Settings panel's header
     /// say why where the windows would be (`LockedMac.line`). Nil from a Mac before it. Cleared with the
     /// session.
-    @Published var lockWhy: LockedMac.Why?
+    @Published var lockWhy: LockedMac.Why? {
+        // A locked Mac shows nothing worth keeping this device lit for: iPadOS's Auto-Lock runs again
+        // (the picture layer holds the display awake while it plays), and holds again once unlocked.
+        didSet { if (oldValue == nil) != (lockWhy == nil) { displayView.setKeepsDeviceAwake(lockWhy == nil) } }
+    }
     var macLocked: Bool { lockWhy != nil }
     /// What covers the stream (`LockedMac.Shade`): the Mac locked, then "Unlocking…" until the first
     /// keyframe after the unlock (`unlockingTimeout` at most). The picture under it was cleared at the
