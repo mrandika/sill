@@ -570,7 +570,10 @@ struct StreamScreen: View {
 
     /// The Desktop in Immersive: the Mac makes a display of the panel's size (DeviceDesktop.swift on
     /// the host). An older host ignores the key and the Mac's own screen letterboxes as before.
-    private var immersiveDeviceDesktop: Bool { immersiveFull && client.active == .desktop }
+    /// Also while nothing streams yet: the device asks for the Desktop as soon as the Mac lists, and the
+    /// Mac builds it from the viewport it has, so the flag and the panel's size must be in the first
+    /// one (a window picked meanwhile is unaffected: the Mac reads the flag for the Desktop alone).
+    private var immersiveDeviceDesktop: Bool { immersiveFull && (client.active == .desktop || client.active == .none) }
 
     #if DEBUG
     /// A length for the console: whole points as whole numbers (within a hundredth: a scaled harness
@@ -875,12 +878,12 @@ struct StreamScreen: View {
     // MARK: Immersive (docs/immersive-plan.md)
 
     /// Immersive applies (ImmersivePolicy.applies): the switch (as it was when Settings opened, while
-    /// it is open), a hardware keyboard, an iPad held sideways, something streaming, VoiceOver off,
-    /// and this scene the whole screen.
+    /// it is open), a hardware keyboard, an iPad held sideways, a session up (or something streaming),
+    /// VoiceOver off, and this scene the whole screen.
     private func immersiveApplies(duo: DuoLayout, geo: GeometryProxy) -> Bool {
         ImmersivePolicy.applies(switchOn: immersiveHeld ?? immersiveSwitch, keyboardAttached: keyboardAttached,
                                 landscape: duo == .innerLandscape && UIDevice.current.userInterfaceIdiom == .pad,
-                                streaming: client.active != .none, voiceOver: voiceOverEnabled,
+                                streaming: client.connected || client.active != .none, voiceOver: voiceOverEnabled,
                                 fillsScreen: immersiveFillsScreen(geo))
     }
 

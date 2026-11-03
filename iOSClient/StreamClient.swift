@@ -241,6 +241,15 @@ final class StreamClient: ObservableObject {
     /// when a list within the spacing still says nothing streams after this device's own request.
     /// Cancelled by the next automatic request (its spacing is over) and at a session's end or move.
     private var desktopRecheck: DispatchWorkItem?
+    /// The device's own Desktop request, held until this session's first viewport has gone out (or
+    /// `desktopAskWait` passes): the Mac builds the Desktop from the last viewport it has, and a
+    /// request that beat it started on the Mac's real display, then again on the display of the
+    /// panel's size a second later (the picture at 1x, then at Aa's scale). Set by
+    /// `askForDesktopByItself`, run by `sendViewport` (`releaseDesktopAsk`) or its timeout.
+    private var desktopAskHold: DispatchWorkItem?
+    /// The longest the Desktop request waits for the first viewport: the panel is measured and the
+    /// viewport sent within a few frames; a screen that never measures one still gets its Desktop.
+    private static let desktopAskWait: TimeInterval = 1.0
     /// DEBUG `-SillNoAutoDesktop 1`: the device never picks the Desktop by itself, so a live gate's
     /// session streams nothing and no host encodes (a test host's software encoder included) while
     /// it runs. Always false in a Release build.
@@ -2644,6 +2653,8 @@ final class StreamClient: ObservableObject {
         lastAutoDesktop = .distantPast
         desktopRecheck?.cancel()           // the new connection's first list decides afresh
         desktopRecheck = nil
+        desktopAskHold?.cancel()
+        desktopAskHold = nil
         #if DEBUG
         switch kind {
         case .fromRemote: print(reconnected ? "remote: the session carried on over the move home (its remote connection went)" : "remote: the session moved home")
@@ -3607,6 +3618,8 @@ final class StreamClient: ObservableObject {
         lastAutoDesktop = .distantPast     // the next connection starts on the Desktop again
         desktopRecheck?.cancel()           // and its re-check, if one waited, is this session's
         desktopRecheck = nil
+        desktopAskHold?.cancel()
+        desktopAskHold = nil
         self.status = status
         macName = ""
         windows = []
@@ -3693,9 +3706,37 @@ final class StreamClient: ObservableObject {
     private func askForDesktopByItself() {
         desktopRecheck?.cancel()
         desktopRecheck = nil
+        desktopAskHold?.cancel()
+        desktopAskHold = nil
         lastAutoDesktop = Date()
-        request(.desktop)
-        choicesAtLastAuto = choicesSent
+        guard lastViewport == nil else {
+            request(.desktop)
+            choicesAtLastAuto = choicesSent
+            return
+        }
+        // No viewport has gone out in this session yet: the Mac would start the Desktop on its own
+        // display and rebuild it for the panel (and Aa) once the viewport came. Ask right after it.
+        let choices = choicesSent
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.desktopAskHold = nil
+            // Something was chosen, or already streams, meanwhile: this request is moot.
+            guard self.connected, self.active == .none, self.choicesSent == choices else { return }
+            #if DEBUG
+            print("session: asking for the Desktop" + (self.lastViewport == nil ? " (no viewport in \(Self.desktopAskWait) s)" : " after the viewport"))
+            #endif
+            self.request(.desktop)
+            self.choicesAtLastAuto = self.choicesSent
+        }
+        desktopAskHold = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.desktopAskWait, execute: work)
+    }
+
+    /// The first viewport of the session has gone out: the Desktop request it was holding follows it.
+    func releaseDesktopAsk() {
+        guard let work = desktopAskHold else { return }
+        work.perform()
+        work.cancel()      // the timeout's turn of the same item does not run it again
     }
 
     /// One re-check when the spacing ends (DiscoveryPolicy's `askIn`): a list within it still said

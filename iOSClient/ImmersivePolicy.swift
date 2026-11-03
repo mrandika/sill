@@ -26,9 +26,10 @@ struct ImmersivePolicy: Equatable {
     // MARK: When it applies
 
     /// Immersive applies: the switch on (as it was when the Settings panel opened, while it is open), a
-    /// hardware keyboard attached, the iPad held sideways, a window or the Desktop streaming (nothing
-    /// streaming keeps the standard layout, so the first picture never lands in a layout that then
-    /// flips: Larger Picture's rule), VoiceOver off (every control stays in reach), and Sill filling
+    /// hardware keyboard attached, the iPad held sideways, a session up (`streaming`: the stream screen
+    /// passes it from the connect, not from the first picture, so the first picture lands in this layout
+    /// and the Mac builds the device's display from the first viewport, with no start on the real screen
+    /// first), VoiceOver off (every control stays in reach), and Sill filling
     /// the screen (not a Stage Manager or Split View window).
     static func applies(switchOn: Bool, keyboardAttached: Bool, landscape: Bool, streaming: Bool,
                         voiceOver: Bool, fillsScreen: Bool) -> Bool {

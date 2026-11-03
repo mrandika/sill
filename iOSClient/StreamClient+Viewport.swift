@@ -23,6 +23,7 @@ extension StreamClient {
         if v.localCursor == nil { v.localCursor = localCursorState.wanted }
         lastViewport = v
         send(.viewport, payload: Wire.encode(v))
+        releaseDesktopAsk()   // the Desktop this device asks for by itself is built from this viewport
     }
 
     /// Say whether this client draws its own pointer: true takes the Mac cursor out of the video,

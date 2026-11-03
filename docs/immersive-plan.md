@@ -39,8 +39,9 @@ the iPad's size the Mac's main display, so the Desktop fills the iPad with no le
 1. Immersive applies only with all of: the switch on (as it was when Settings opened, while Settings
    is open: `immersiveHeld`, as `largerPictureHeld`), a hardware keyboard attached
    (`HardwareKeyboardMonitor`), the iPad sideways (`.innerLandscape`), a window or the Desktop
-   streaming (nothing streaming keeps the bar, so a first picture never lands in a layout that then
-   flips: Larger Picture's rule 12), VoiceOver off, and Sill's scene filling the screen
+   streaming or the session up (from the connect, 2026-11-03: the device asks for the Desktop at once, and
+   the Mac builds its display from the first viewport, which must already carry `deviceDesktop` and the
+   immersive panel's size, or the stream starts on the Mac's real screen and again at Aa's scale), VoiceOver off, and Sill's scene filling the screen
    (`ImmersivePolicy.fills`: not a Stage Manager or Split View window).
 2. Three states (`ImmersivePolicy.State`): `off`, main's layout; `immersed`, no bar and the panel the
    whole screen; `revealed`, the bar over that same panel. Only a move between `off` and the other
